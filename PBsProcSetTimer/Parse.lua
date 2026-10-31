@@ -26,6 +26,10 @@
 -- that is still unclassified and comes after every other time is the cooldown. A text with a
 -- single unclassified time keeps it as a duration.
 --
+-- A bonus line can hold more than one effect (two sentences that each last a while, or two
+-- cooldown sentences); it is cut into them and every piece is read on its own, so the effects can
+-- run independently.
+--
 -- /procset text prints the raw lines and what was read from them.
 
 if not PBS_PROCSETTIMER then
@@ -98,7 +102,7 @@ local CUES = {
 	},
 	duration = {
 		before = { "for%s*$", "lasting%s*$", "für%s*$", "pendant%s*$", "durante%s*$" },
-		after = { "^間", "^持続", "^内" },
+		after = { "^間", "^の間", "^持続", "^内" },
 	},
 }
 local CLASS_ORDER = { "cooldown", "delay", "duration" }
@@ -165,7 +169,7 @@ local function ScanTimes(text)
 			if seconds then
 				local before = text:sub(zo_max(1, s - CONTEXT_BYTES), s - 1):lower()
 				local after = text:sub(unitEnd + 1, unitEnd + CONTEXT_BYTES):lower()
-				hits[#hits + 1] = { seconds = seconds, class = Classify(before, after) }
+				hits[#hits + 1] = { seconds = seconds, class = Classify(before, after), first = s, last = unitEnd }
 			end
 			pos = unitEnd + 1
 		end
@@ -222,6 +226,78 @@ end
 
 addon.NormalizeText = Normalize
 
+-- The last byte of the sentence that holds position `from`: its full stop (ASCII, CJK or
+-- full-width), or the end of the text. A stop inside a number ("1.3") is not one.
+local function SentenceEnd(text, from)
+	local best = #text
+	local function consider(position)
+		if position and position < best then
+			best = position
+		end
+	end
+	consider(text:find("%.%s", from))
+	consider(text:find("[!?]", from))
+	for _, stop in ipairs({ "。", "！", "？" }) do
+		local at = text:find(stop, from, true)
+		consider(at and at + #stop - 1)
+	end
+	return best
+end
+
+-- A bonus line can hold more than one effect. It is read sentence by sentence and cut into
+-- groups of sentences, one group per effect:
+--
+--     * a sentence with a cooldown closes the group it is in ("This effect can occur once every 8
+--       seconds."), and whatever comes next starts a new one;
+--     * a sentence with a duration ("for 15 seconds") starts a new group when the group it would
+--       join already has one -- two effects that each last a while are two effects.
+--
+-- A line that yields fewer than two groups with a time in them stays whole, which is what every
+-- line did before. (A time whose wording is not recognised never starts a group: the wording
+-- may be a cooldown the cues missed, and splitting on it would cut one effect in two.)
+function addon.SplitEffects(text)
+	text = Normalize(text)
+	local hits = ScanTimes(text)
+
+	local groups = {}
+	local current
+	local from = 1
+	while from <= #text and not text:sub(from):match("^%s*$") do
+		local stop = SentenceEnd(text, from)
+		local hasCooldown, hasDuration = false, false
+		for _, hit in ipairs(hits) do
+			if hit.first >= from and hit.first <= stop then
+				if hit.class == "cooldown" then
+					hasCooldown = true
+				elseif hit.class == "duration" then
+					hasDuration = true
+				end
+			end
+		end
+		if not current or current.closed or (hasDuration and current.hasDuration) then
+			current = { first = from, hasDuration = false, closed = false }
+			groups[#groups + 1] = current
+		end
+		current.last = stop
+		current.hasDuration = current.hasDuration or hasDuration
+		current.closed = current.closed or hasCooldown
+		from = stop + 1
+	end
+
+	local pieces = {}
+	for _, group in ipairs(groups) do
+		local piece = text:sub(group.first, group.last):match("^%s*(.-)%s*$")
+		local read = addon.ParseBonusText(piece)
+		if read.cooldown ~= nil or read.duration ~= nil then
+			pieces[#pieces + 1] = piece
+		end
+	end
+	if #pieces < 2 then
+		return { text }
+	end
+	return pieces
+end
+
 -- setId -> every bonus line of the set, each read for its timings; nil if the game has no such set.
 --   bonuses[i] = {
 --     index, required   the line's position and the pieces it needs
@@ -230,9 +306,12 @@ addon.NormalizeText = Normalize
 --     cooldown / duration / delay   seconds, or nil when the text does not say
 --     inferred          a time was placed by its position, not by its wording
 --     timed             the line has a cooldown or a duration, so it is worth a row
+--     effects           the timed effects of the line (see SplitEffects), usually one; each
+--                       carries the line's index/required/perfected plus its own text and times,
+--                       and key (unique in the set), k (its number in the line), n (how many)
 --   }
--- Which line a row follows is decided by the caller: the highest timed one that the worn
--- pieces switch on.
+-- Also: effects (every timed effect of the set, in the order of the text) and effectCount.
+-- Which effects get a row is decided by the caller: all those whose line the worn pieces switch on.
 function addon.ReadSetEffect(setId)
 	local hasSet, setName, numBonuses = GetItemSetInfo(setId)
 	if not hasSet or not numBonuses or numBonuses < 1 then
@@ -240,13 +319,12 @@ function addon.ReadSetEffect(setId)
 	end
 
 	local bonuses = {}
-	local anyTimed = false
+	local effects = {}
 	for index = 1, numBonuses do
 		local required, description, perfected = GetItemSetBonusInfo(setId, index)
 		local parsed = addon.ParseBonusText(description)
 		local timed = parsed.cooldown ~= nil or parsed.duration ~= nil
-		anyTimed = anyTimed or timed
-		bonuses[index] = {
+		local line = {
 			index = index,
 			required = required or 5,
 			perfected = perfected and true or false,
@@ -257,7 +335,38 @@ function addon.ReadSetEffect(setId)
 			delay = parsed.delay,
 			inferred = parsed.inferred,
 			timed = timed,
+			effects = {},
 		}
+		bonuses[index] = line
+
+		if timed then
+			local pieces = addon.SplitEffects(description)
+			for _, piece in ipairs(pieces) do
+				-- a whole line was read above; only a cut-up line needs reading piece by piece
+				local read = (#pieces == 1) and parsed or addon.ParseBonusText(piece)
+				if read.cooldown ~= nil or read.duration ~= nil then
+					local k = #line.effects + 1
+					line.effects[k] = {
+						index = index,
+						key = index * 100 + k,
+						k = k,
+						required = line.required,
+						perfected = line.perfected,
+						text = piece,
+						parsed = read,
+						cooldown = read.cooldown,
+						duration = read.duration,
+						delay = read.delay,
+						inferred = read.inferred,
+						timed = true,
+					}
+				end
+			end
+			for _, effect in ipairs(line.effects) do
+				effect.n = #line.effects
+				effects[#effects + 1] = effect
+			end
+		end
 	end
-	return { setName = setName, bonuses = bonuses, timed = anyTimed }
+	return { setName = setName, bonuses = bonuses, timed = #effects > 0, effects = effects, effectCount = #effects }
 end

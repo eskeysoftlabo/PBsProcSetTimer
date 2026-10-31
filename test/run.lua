@@ -73,6 +73,8 @@ end
 local function boot(texts)
 	PBS_PROCSETTIMER = nil
 	M.events, M.filters, M.updates, M.controls, M.chat, M.sounds = {}, {}, {}, {}, {}, {}
+	M.callbacks = {}
+	M.abilityText = {}
 	M.time = 100
 	HUD_SCENE.callbacks, HUD_UI_SCENE.callbacks = {}, {}
 	SLASH_COMMANDS = {}
@@ -229,6 +231,41 @@ eq(#addon.ParseBonusText("Adds 8% damage. Level 5 required.").hits, 0, "percent 
 eq(addon.ParseBonusText("|cFFFFFF8 seconds|r |t16:16:x.dds|t").duration, 8, "colour codes and texture tags stripped")
 eq(addon.ParseBonusText("for 1,5 seconds").duration, 1.5, "decimal comma")
 
+section("parser: a bonus line with several effects")
+eq(#addon.SplitEffects(T.en.martial[4][2]), 1, "one cooldown sentence: the line stays whole")
+eq(#addon.SplitEffects(T.en.nightmare[4][2]), 1, "a delay and a cooldown in two sentences: still one effect")
+eq(#addon.SplitEffects(T.en.zen[4][2]), 1, "no cooldown at all: one effect")
+do
+	local pieces = addon.SplitEffects("Gain A for 4 seconds. Gain B for 2 seconds. This effect can occur once every 10 seconds.")
+	eq(#pieces, 2, "two sentences that each last a while are two effects")
+	eq(addon.ParseBonusText(pieces[1] or "").cooldown, nil, "the cooldown sentence belongs to the effect it follows: the first has none")
+	eq(addon.ParseBonusText(pieces[2] or "").cooldown, 10, "the second has it")
+end
+eq(#addon.SplitEffects("Gain A for 4 seconds. It is stronger if you are stunned. Once every 10 seconds."), 1, "a sentence with no time does not start an effect")
+eq(#addon.SplitEffects("軽攻撃で敵が5秒間、8%多くのダメージを受ける。この効果の再発動には8秒必要。"), 1, "a cooldown the cues do not know is not taken for a second effect")
+for _, lang in ipairs({ "en", "jp", "de" }) do
+	local pieces = addon.SplitEffects(T.twin[lang])
+	eq(#pieces, 2, lang .. ": two cooldown sentences cut the line in two")
+	local first, second = addon.ParseBonusText(pieces[1] or ""), addon.ParseBonusText(pieces[2] or "")
+	eq(first.duration, 6, lang .. ": first effect lasts 6 s")
+	eq(first.cooldown, 12, lang .. ": first effect cooldown 12 s")
+	eq(second.duration, 3, lang .. ": second effect lasts 3 s")
+	eq(second.cooldown, 20, lang .. ": second effect cooldown 20 s")
+end
+for _, key in ipairs({ "en", "jp", "jp2", "de" }) do
+	local pieces = addon.SplitEffects(T.wretched[key])
+	eq(#pieces, 2, key .. ": Wretched Vitality's two sentences, each lasting 15 s, are two effects")
+	local first, second = addon.ParseBonusText(pieces[1] or ""), addon.ParseBonusText(pieces[2] or "")
+	eq(first.duration, 15, key .. ": first lasts 15 s")
+	eq(second.duration, 15, key .. ": second lasts 15 s")
+	eq(first.cooldown, nil, key .. ": neither has a cooldown")
+	eq(second.cooldown, nil, key .. ": ... the second neither")
+end
+do
+	local tail = addon.SplitEffects("Gain A for 4 seconds. Once every 10 seconds. Gain B for 2 seconds. Once every 7 seconds. Then gain C for 9 seconds.")
+	eq(#tail, 3, "an effect after the last cooldown sentence that names a time is one of its own")
+end
+
 section("reading a set through the item API")
 local info = addon.ReadSetEffect(SET.martial.id)
 eq(#info.bonuses, 4, "four bonus lines")
@@ -380,41 +417,52 @@ ok(top().hidden, "nothing worn: window hidden")
 eq(M.listening(EVENT_EFFECT_CHANGED), 0, "nothing worn: listeners removed")
 
 -- ======================================================================================
-section("any set: the bonus line follows the pieces worn")
+section("any set: every timed bonus line that is on has a row of its own")
 addon = boot()
 wearId(9001, 2)
 eq(#visibleRows(), 0, "2 pieces: the only bonus on is a stat line, no row")
 eq(M.listening(EVENT_EFFECT_CHANGED), 0, "and nothing listens")
 wearId(9001, 3)
 eq(#visibleRows(), 1, "3 pieces: the timed 3-piece line switches a row on")
-eq(rowFor("Test Haste Set").name.text, "Test Haste Set", "row carries the set's name")
+local HASTE3, HASTE5 = "Test Haste Set (3)", "Test Haste Set (5)"
+eq(rowFor(HASTE3).name.text, HASTE3, "a set with two timed effects names each row by the pieces its line needs")
 frame()
 t0 = M.time
 -- the player's own skill gives Major Courage for 20 s: named in the text, but not the proc's length
 effect(EFFECT_RESULT_GAINED, "Major Courage", 61488, 1, t0, t0 + 20)
 frame()
-eq(rowFor("Test Haste Set").text.text, GetString(SI_PBSPST_READY), "a standard buff named in the text, lasting 20 s, is not the 6 s proc")
+eq(rowFor(HASTE3).text.text, GetString(SI_PBSPST_READY), "a standard buff named in the text, lasting 20 s, is not the 6 s proc")
 -- a fade seen first must not decide anything
 effect(EFFECT_RESULT_FADED, "Major Courage", 109084, 1, t0 - 6, t0)
 effect(EFFECT_RESULT_GAINED, "Major Courage", 109084, 1, t0, t0 + 6)
 frame()
-eq(rowFor("Test Haste Set").text.text, activeText(6) .. "  " .. cdText(12), "the same name lasting the text's 6 s is the proc")
+eq(rowFor(HASTE3).text.text, activeText(6) .. "  " .. cdText(12), "the same name lasting the text's 6 s is the proc")
 -- a hit is never matched on the text alone
 hit(ACTION_RESULT_DAMAGE, "Major Courage", 109085)
-eq(addon.sv and true, true, "alive")
+frame()
+eq(rowFor(HASTE3).text.text, activeText(6) .. "  " .. cdText(12), "a hit named like a buff in the text changes nothing")
 wearId(9001, 5)
 frame()
-eq(rowFor("Test Haste Set").text.text, GetString(SI_PBSPST_READY), "5 pieces: the 5-piece line takes over, timers reset")
+eq(#visibleRows(), 2, "5 pieces: the 5-piece line adds a second row (bonus lines add up, they do not replace)")
+eq(rowFor(HASTE3).text.text, activeText(6) .. "  " .. cdText(12), "the 3-piece row carries on, not reset")
+eq(rowFor(HASTE5).text.text, GetString(SI_PBSPST_READY), "the new row starts ready")
 hit(ACTION_RESULT_POWER_ENERGIZE, "Test Haste Set", 7001)
 frame()
-eq(rowFor("Test Haste Set").text.text, cdText(20), "the 5-piece line's cooldown is 20 s")
-M.advance(1)
-effect(EFFECT_RESULT_GAINED, "Major Courage", 109084, 1, M.time, M.time + 6)
+eq(rowFor(HASTE5).text.text, cdText(20), "a hit named after the set goes to the effect that lasts no time: the 5-piece cooldown is 20 s")
+eq(rowFor(HASTE3).text.text, activeText(6) .. "  " .. cdText(12), "and the 3-piece row is untouched")
+M.advance(2)
 frame()
-eq(rowFor("Test Haste Set").text.text, cdText(19), "the old line's effect no longer counts")
+eq(rowFor(HASTE3).text.text, activeText(4) .. "  " .. cdText(10), "t+2: the 3-piece timers count on")
+eq(rowFor(HASTE5).text.text, cdText(18), "and the 5-piece's run independently")
+-- the 5-piece line goes off while its cooldown runs: its row stays, the 3-piece row goes on
 wearId(9001, 4)
 frame()
-eq(rowFor("Test Haste Set").text.text, GetString(SI_PBSPST_READY), "4 pieces: back on the 3-piece line")
+eq(#visibleRows(), 2, "4 pieces: the 5-piece line is off but its cooldown runs, so its row stays")
+eq(rowFor(HASTE5).text.text, cdText(18), "still counting")
+M.advance(19)
+frame()
+eq(#visibleRows(), 1, "its cooldown over and the line off: only the 3-piece row is left")
+eq(rowFor(HASTE3).text.text, GetString(SI_PBSPST_READY), "ready again")
 
 section("any set: stat-only, monster and Perfected sets")
 addon = boot()
@@ -574,17 +622,22 @@ M.fire(EVENT_PLAYER_ACTIVATED)
 frame()
 eq(#visibleRows(), 0, "after a zone change nothing runs any more: the row goes")
 
--- another bonus line takes over: that is a different effect, not a continuation
+-- one bonus line goes off while another stays on: each keeps its own timers
 addon = boot()
 wearId(9001, 5)
 frame()
+eq(#visibleRows(), 2, "5 pieces from scratch, nothing running: both timed bonus lines are on, a row each")
+eq(rowAt(1).name.text, "Test Haste Set (3)", "in the order of the text: the 3-piece effect first")
+eq(rowAt(2).name.text, "Test Haste Set (5)", "then the 5-piece one")
 hit(ACTION_RESULT_POWER_ENERGIZE, "Test Haste Set", 7001)
 frame()
-eq(rowFor("Test Haste Set").text.text, cdText(20), "5-piece line proc: cooldown 20 s")
+eq(rowFor("Test Haste Set (5)").text.text, cdText(20), "5-piece effect: cooldown 20 s")
 M.wear(9001, 3)
 M.fire(EVENT_ACTIVE_WEAPON_PAIR_CHANGED, 2, false)
+M.advance(3)
 frame()
-eq(rowFor("Test Haste Set").text.text, GetString(SI_PBSPST_READY), "3 pieces: the 3-piece line is a different effect and starts fresh")
+eq(rowFor("Test Haste Set (5)").text.text, cdText(17), "5-piece line off: its cooldown still counts on its own row")
+eq(rowFor("Test Haste Set (3)").text.text, GetString(SI_PBSPST_READY), "the 3-piece effect is still on, and ready")
 
 section("what /procset log and /procset sets say about a swap")
 addon = boot()
@@ -601,7 +654,7 @@ local logged = table.concat(M.chat, "\n")
 ok(logged:find("bar swap: weapon pair 2", 1, true) ~= nil, "the swap is logged")
 ok(logged:find("5 -> 4 piece", 1, true) ~= nil, "so is the change of count, with the game's own count beside it")
 ok(logged:find("the game's count for the set: 4", 1, true) ~= nil, "the count the game keeps for the set is shown")
-ok(logged:find("no bonus with a time is on", 1, true) ~= nil, "and the bonus going off")
+ok(logged:find("its bonus is off", 1, true) ~= nil, "and the bonus going off")
 M.chat = {}
 slash("sets")
 ok(table.concat(M.chat, "\n"):find("switched off, kept while its timers run", 1, true) ~= nil, "/procset sets says why the row is still there")
@@ -618,6 +671,143 @@ addon = boot()
 M.chat = {}
 slash("log")
 eq(M.chat[1], "Nothing logged yet.", "an empty log says so")
+
+section("any set: a bonus line holding two effects gives two rows")
+addon = boot()
+wearId(9201, 5)
+frame()
+local TW1, TW2 = "Twin Effect Set (5-1)", "Twin Effect Set (5-2)"
+eq(#visibleRows(), 2, "two effects in one bonus line: two rows")
+eq(rowFor(TW1).name.text, TW1, "named by the pieces and the effect's number")
+eq(rowFor(TW2).name.text, TW2, "the second one too")
+t0 = M.time
+effect(EFFECT_RESULT_GAINED, "Major Courage", 61488, 1, t0, t0 + 6)
+frame()
+eq(rowFor(TW1).text.text, activeText(6) .. "  " .. cdText(12), "a buff named in the first effect's text, 6 s long: the first row")
+eq(rowFor(TW2).text.text, GetString(SI_PBSPST_READY), "the second row is not touched")
+M.advance(1)
+effect(EFFECT_RESULT_GAINED, "Minor Heroism", 61708, 1, M.time, M.time + 3)
+frame()
+eq(rowFor(TW1).text.text, activeText(5) .. "  " .. cdText(11), "t+1: the first row counts on")
+eq(rowFor(TW2).text.text, activeText(3) .. "  " .. cdText(20), "the second effect starts its own timers")
+M.advance(5)
+frame()
+eq(rowFor(TW1).text.text, cdText(6), "t+6: first, cooldown only")
+eq(rowFor(TW2).text.text, cdText(15), "second, cooldown only: its own clock, it began a second later")
+M.advance(20)
+-- named after the set, so tier 1 knows the set but not which effect: the length decides
+effect(EFFECT_RESULT_GAINED, "Twin Effect Set", 9999, 1, M.time, M.time + 3)
+frame()
+eq(rowFor(TW2).text.text, activeText(3) .. "  " .. cdText(20), "an effect named after the set goes to the effect whose duration it has")
+eq(rowFor(TW1).text.text, GetString(SI_PBSPST_READY), "and the other is ready")
+
+M.chat = {}
+slash("sets")
+local listed = table.concat(M.chat, "\n")
+ok(listed:find("rows: 5-piece bonus, effect 1 of 2; 5-piece bonus, effect 2 of 2", 1, true) ~= nil, "/procset sets lists both rows")
+M.chat = {}
+slash("text 9201")
+listed = table.concat(M.chat, "\n")
+ok(listed:find("effect 1 of 2: duration 6.0s, cooldown 12.0s", 1, true) ~= nil, "/procset text shows how the line was cut: first effect")
+ok(listed:find("effect 2 of 2: duration 3.0s, cooldown 20.0s", 1, true) ~= nil, "second effect")
+
+-- pinning an ability to one effect, or to the whole set
+slash("bind 4242 Twin:5-2")
+eq(type(addon.sv.bind[4242]), "table", "bind <set>:<pieces>-<n> pins one effect")
+eq(addon.sv.bind[4242].set, 9201, "the set")
+eq(addon.sv.bind[4242].line, 5, "the pieces")
+eq(addon.sv.bind[4242].k, 2, "the effect's number")
+slash("bind 4243 Twin:5")
+eq(addon.sv.bind[4243].k, 1, "no number means the first effect")
+slash("bind 4244 Twin")
+eq(addon.sv.bind[4244], 9201, "no pieces: the whole set, as before")
+M.advance(30)
+frame()
+hit(ACTION_RESULT_DAMAGE, "Whatever Strike", 4242)
+frame()
+eq(rowFor(TW2).text.text, cdText(20), "the pinned ability drives the second effect only")
+eq(rowFor(TW1).text.text, GetString(SI_PBSPST_READY), "and not the first")
+M.advance(21)
+hit(ACTION_RESULT_DAMAGE, "Other Strike", 4243)
+frame()
+eq(rowFor(TW1).text.text, cdText(12), "pinned to the first effect")
+M.chat = {}
+slash("bind 4245 nosuchset:5")
+eq(M.chat[1], string.format(GetString(SI_PBSPST_SET_NOT_FOUND), "nosuchset"), "an unknown set is reported without the :pieces part")
+slash("bind clear")
+eq(next(addon.sv.bind), nil, "bind clear removes them all")
+
+slash("hide Twin")
+eq(#visibleRows(), 0, "hiding the set takes both rows")
+slash("show Twin")
+eq(#visibleRows(), 2, "showing it brings both back")
+
+section("any set: two effects that look alike (Wretched Vitality)")
+local WR1, WR2 = "Wretched Test Set (5-1)", "Wretched Test Set (5-2)"
+-- Two auras named after the set, 15 s each; their descriptions quote the 260 and the 130.
+-- The 130 one is applied first on purpose: the numbers, not the order, must decide.
+addon = boot()
+M.abilityText[8001] = "Increases Magicka and Stamina Recovery by 260."
+M.abilityText[8002] = "Increases Magicka and Stamina Recovery by 130."
+wearId(9202, 5)
+frame()
+eq(#visibleRows(), 2, "no cooldown sentence, two durations: two rows")
+eq(rowFor(WR1).text.text, GetString(SI_PBSPST_IDLE), "no cooldown: idle, not Ready")
+t0 = M.time
+effect(EFFECT_RESULT_GAINED, "Wretched Test Set", 8002, 1, t0, t0 + 15)
+frame()
+eq(rowFor(WR2).text.text, activeText(15), "the aura quoting 130 drives the effect that names 130 (the second), though it came first")
+eq(rowFor(WR1).text.text, GetString(SI_PBSPST_IDLE), "and not the first")
+M.advance(2)
+effect(EFFECT_RESULT_GAINED, "Wretched Test Set", 8001, 1, M.time, M.time + 15)
+frame()
+eq(rowFor(WR1).text.text, activeText(15), "the aura quoting 260 drives the first")
+eq(rowFor(WR2).text.text, activeText(13), "and the second counts on by itself")
+-- a refresh goes to the same row, and so does everything after the verdicts were cleared
+M.advance(5)
+effect(EFFECT_RESULT_UPDATED, "Wretched Test Set", 8002, 1, M.time, M.time + 15)
+wearId(9001, 5) -- another set changes the rows: the verdicts are cleared
+effect(EFFECT_RESULT_UPDATED, "Wretched Test Set", 8001, 1, M.time, M.time + 15)
+frame()
+eq(rowFor(WR2).text.text, activeText(15), "after the verdicts were cleared the 130 aura still drives the second")
+eq(rowFor(WR1).text.text, activeText(15), "and the 260 aura the first")
+M.chat = {}
+slash("status")
+local statusText = table.concat(M.chat, "\n")
+ok(statusText:find("matched effect 8001 Wretched Test Set", 1, true) ~= nil, "/procset status lists the ability that drives each effect")
+ok(statusText:find("by 260", 1, true) ~= nil, "and says what the game says that ability does")
+
+-- No description to go by: the abilities fill the effects in the order they turn up.
+addon = boot()
+wearId(9202, 5)
+frame()
+t0 = M.time
+effect(EFFECT_RESULT_GAINED, "Wretched Test Set", 8101, 1, t0, t0 + 15)
+frame()
+eq(rowFor(WR1).text.text, activeText(15), "the first ability seen drives the first effect")
+eq(rowFor(WR2).text.text, GetString(SI_PBSPST_IDLE), "the second is still free")
+effect(EFFECT_RESULT_GAINED, "Wretched Test Set", 8102, 1, t0, t0 + 15)
+frame()
+eq(rowFor(WR2).text.text, activeText(15), "a different ability drives the second effect, not the first again")
+effect(EFFECT_RESULT_UPDATED, "Wretched Test Set", 8101, 1, M.time, M.time + 15)
+frame()
+eq(rowFor(WR1).text.text, activeText(15), "and the first ability stays with the first")
+-- the user corrects a swapped pair
+slash("bind 8101 Wretched:5-2")
+slash("bind 8102 Wretched:5-1")
+M.advance(20)
+frame()
+effect(EFFECT_RESULT_GAINED, "Wretched Test Set", 8101, 1, M.time, M.time + 15)
+frame()
+eq(rowFor(WR2).text.text, activeText(15), "after bind the ability goes to the effect it was pinned to")
+eq(rowFor(WR1).text.text, GetString(SI_PBSPST_IDLE), "and the other is untouched")
+-- /procset probe says what an unmatched ability does
+slash("bind clear")
+M.abilityText[777] = "Does something unrelated."
+slash("probe")
+M.chat = {}
+effect(EFFECT_RESULT_GAINED, "Unrelated Thing", 777, 1, M.time, M.time + 4)
+ok(table.concat(M.chat, "\n"):find("Does something unrelated.", 1, true) ~= nil, "probe prints the ability's description")
 
 section("hiding sets by id or by name")
 addon = boot()
@@ -784,23 +974,108 @@ ok(top().hidden, "disabled: hidden")
 addon:Set("enabled", true)
 ok(not top().hidden, "enabled again")
 
-section("preview shows three sample rows")
+-- colour of a control: its red / green / blue as 0..255
+local function colorIs(control, r, g, b, label)
+	local c = control.color or {}
+	near((c[1] or -1) * 255, r, label .. ": red")
+	near((c[2] or -1) * 255, g, label .. ": green")
+	near((c[3] or -1) * 255, b, label .. ": blue")
+end
+
+section("colors of the bar and of the text beside it")
+addon = boot()
+wear("martial", 5)
+wear("zen", 5)
+frame()
+colorIs(rowOf("martial").fill, 100, 205, 255, "ready bar")
+colorIs(rowOf("martial").text, 100, 205, 255, "ready text follows the bar")
+colorIs(rowOf("zen").text, 140, 140, 140, "idle text")
+t0 = M.time
+effect(EFFECT_RESULT_GAINED, AB.martial, 127070, 77, t0, t0 + 5)
+frame()
+colorIs(rowOf("martial").fill, 255, 255, 255, "proc flash bar")
+colorIs(rowOf("martial").text, 255, 255, 255, "proc flash text")
+M.advance(1)
+frame()
+colorIs(rowOf("martial").fill, 90, 230, 100, "in effect bar")
+colorIs(rowOf("martial").text, 90, 230, 100, "in effect text")
+M.advance(5)
+frame()
+colorIs(rowOf("martial").fill, 255, 155, 50, "cooldown bar")
+colorIs(rowOf("martial").text, 255, 155, 50, "cooldown text")
+
+-- choosing a colour repaints the row that is already up
+addon:Set("colorCooldownR", 0)
+addon:Set("colorCooldownG", 0)
+addon:Set("colorCooldownB", 255)
+frame()
+colorIs(rowOf("martial").fill, 0, 0, 255, "cooldown bar, chosen")
+colorIs(rowOf("martial").text, 0, 0, 255, "cooldown text, chosen")
+colorIs(rowOf("zen").text, 140, 140, 140, "the other states keep theirs")
+addon:Set("colorIdleG", 40)
+frame()
+colorIs(rowOf("zen").text, 140, 40, 140, "idle text, chosen")
+addon:Set("colorReadyR", 255)
+addon:Set("colorReadyG", 0)
+M.advance(5)
+frame()
+colorIs(rowOf("martial").fill, 255, 0, 255, "ready bar, chosen")
+addon:Set("colorFlashB", 0)
+t0 = M.time
+effect(EFFECT_RESULT_GAINED, AB.martial, 127070, 78, t0, t0 + 5)
+frame()
+colorIs(rowOf("martial").fill, 255, 255, 0, "proc flash, chosen")
+
+-- the sample rows show them too
+addon:SetPreview(true)
+frame()
+colorIs(rowAt(1).fill, 90, 230, 100, "sample: in effect")
+colorIs(rowAt(2).fill, 0, 0, 255, "sample: cooldown, chosen")
+colorIs(rowAt(3).fill, 255, 0, 255, "sample: ready, chosen")
+colorIs(rowAt(4).text, 140, 40, 140, "sample: idle text, chosen")
+colorIs(rowAt(5).fill, 255, 255, 0, "sample: flash, chosen")
+addon:SetPreview(false)
+
+addon:ResetColors()
+frame()
+colorIs(rowOf("zen").text, 140, 140, 140, "reset colors: idle")
+addon:SetPreview(true)
+frame()
+colorIs(rowAt(2).fill, 255, 155, 50, "reset colors: cooldown")
+colorIs(rowAt(3).fill, 100, 205, 255, "reset colors: ready")
+colorIs(rowAt(5).fill, 255, 255, 255, "reset colors: flash")
+addon:SetPreview(false)
+eq(addon.sv.posX, addon.DEFAULTS.posX, "reset colors touch nothing else")
+addon:Set("colorActiveG", 0)
+addon:Set("posX", -500)
+addon:Reset()
+eq(addon.sv.colorActiveG, 230, "reset all settings: the colors too")
+eq(addon.sv.posX, addon.DEFAULTS.posX, "and the rest")
+-- colours saved by an older version do not exist: the defaults fill in
+M.persist = { hidden = {}, bind = {}, ignore = {}, posX = -905 }
+addon = boot()
+colorIs({ color = { addon.sv.colorActiveR / 255, addon.sv.colorActiveG / 255, addon.sv.colorActiveB / 255 } }, 90, 230, 100, "older saved data gets the default color")
+M.persist = nil
+
+section("preview shows five sample rows")
 addon = boot()
 addon:SetPreview(true)
 ok(not top().hidden, "preview: window shown with nothing worn")
 frame()
-eq(#visibleRows(), 3, "three sample rows")
+eq(#visibleRows(), 5, "five sample rows")
 eq(rowAt(1).name.text, string.format(GetString(SI_PBSPST_SAMPLE_SET), 1), "sample name 1")
 eq(rowAt(3).name.text, string.format(GetString(SI_PBSPST_SAMPLE_SET), 3), "sample name 3")
 eq(rowAt(1).text.text, GetString(SI_PBSPST_PREVIEW_ROW), "sample row 1: active with a cooldown")
 eq(rowAt(2).text.text, cdText(4.8), "sample row 2: cooldown")
 eq(rowAt(3).text.text, GetString(SI_PBSPST_READY), "sample row 3: ready")
+eq(rowAt(4).text.text, GetString(SI_PBSPST_IDLE), "sample row 4: idle")
+eq(rowAt(5).text.text, GetString(SI_PBSPST_PREVIEW_ROW), "sample row 5: the flash")
 eq(rowAt(3).fill.w, 140, "sample bar uses the configured width")
 addon:Set("barWidth", 200)
 frame()
 eq(rowAt(3).fill.w, 200, "and follows a change of it")
 wear("martial", 5)
-eq(#visibleRows(), 3, "worn sets do not add rows during a preview")
+eq(#visibleRows(), 5, "worn sets do not add rows during a preview")
 addon:SetPreview(false)
 eq(#visibleRows(), 1, "preview off: the real row")
 addon:SetPreview(true)
@@ -859,24 +1134,105 @@ ok(joined:find("5-piece bonus", 1, true) ~= nil, "sets lists the row's bonus")
 ok(joined:find("no time in any bonus text", 1, true) ~= nil, "sets explains the stat-only set")
 print(joined)
 
+-- A stand-in for LibHarvensAddonSettings: the list of settings with a run of them taken out and put
+-- back, the callback manager's AddonSelected, and the scene the library owns.
+local function fakeLibrary()
+	local lib = { ST_SECTION = 1, ST_LABEL = 2, ST_CHECKBOX = 3, ST_SLIDER = 4, ST_BUTTON = 5, ST_DROPDOWN = 6 }
+	lib.scene = { callbacks = {} }
+	function lib.scene:RegisterCallback(_, fn)
+		self.callbacks[#self.callbacks + 1] = fn
+	end
+	function lib.scene:Fire(state)
+		for _, fn in ipairs(self.callbacks) do
+			fn(self, state)
+		end
+	end
+	function lib:AddAddon(title)
+		local panel = { title = title, settings = {}, selected = false, edits = 0, updates = 0 }
+		function panel:AddSetting(setting, index)
+			table.insert(self.settings, index or (#self.settings + 1), setting)
+			return setting
+		end
+		function panel:AddSettings(rows, index)
+			for i, row in ipairs(rows) do
+				table.insert(self.settings, index and (index + i - 1) or (#self.settings + 1), row)
+			end
+			self.edits = self.edits + 1
+		end
+		function panel:RemoveSettings(index, count)
+			for _ = 1, count or 1 do
+				table.remove(self.settings, index)
+			end
+			self.edits = self.edits + 1
+		end
+		function panel:UpdateControls()
+			self.updates = self.updates + 1
+		end
+		lib.panel = panel
+		return panel
+	end
+	return lib
+end
+-- the user picks the add-on's panel in the add-on list
+local function openPanel(lib)
+	CALLBACK_MANAGER:FireCallbacks("LibHarvensAddonSettings_AddonSelected", lib.panel.title, lib.panel)
+	lib.panel.selected = true
+end
+local function labelled(panel, text)
+	for _, setting in ipairs(panel.settings) do
+		if setting.label == text then
+			return setting
+		end
+	end
+	return nil
+end
+-- the checkboxes of the list of sets (the others carry other tooltips)
+local function setRows(panel)
+	local out = {}
+	for _, setting in ipairs(panel.settings) do
+		if setting.type == 3 and setting.tooltip == GetString(SI_PBSPST_SET_ROW_TOOLTIP) then
+			out[#out + 1] = setting
+		end
+	end
+	return out
+end
+
+section("the version is read from the manifest and shown in the add-on list")
+do
+	local file = io.open("../PBsProcSetTimer/PBsProcSetTimer.addon")
+	local manifest = file:read("*a")
+	file:close()
+	local fromTitle = manifest:match("## Title:[^\n]-([%d%.]+)%s*\n")
+	local fromVersion = manifest:match("## Version:%s*([%d%.]+)")
+	ok(fromVersion ~= nil and fromVersion ~= "", "the manifest has a version")
+	eq(fromTitle, fromVersion, "## Title and ## Version carry the same number")
+	ok(manifest:find("To release a new version", 1, true) ~= nil, "the manifest says where the version is edited, as the other add-ons' do")
+
+	local lib = fakeLibrary()
+	LibHarvensAddonSettings = lib
+	addon = boot()
+	LibHarvensAddonSettings = nil
+	eq(addon.version, fromVersion, "the add-on reads its version back from the manifest")
+	eq(addon.title, "PB’s Proc Set Timer " .. fromVersion, "its name carries the version")
+	eq(lib.panel.title, addon.title, "the add-on list shows the name with the version")
+	eq(lib.panel.version, fromVersion, "and the panel's header shows the version")
+	eq(lib.panel.author, "PinkBanther", "and the author")
+	ok(M.chat[1] == nil or not M.chat[1]:find("nil", 1, true), "the load banner is not printed with a missing version")
+	M.chat = {}
+	M.fire(EVENT_PLAYER_ACTIVATED)
+	addon.bannerShown = nil
+	M.fire(EVENT_PLAYER_ACTIVATED)
+	ok(M.chat[1] ~= nil and M.chat[1]:find(fromVersion, 1, true) ~= nil, "the load banner names the version")
+end
+
 section("settings panel builds and every setting reads and writes")
 do
-	local made = {}
-	LibHarvensAddonSettings = {
-		ST_SECTION = 1, ST_LABEL = 2, ST_CHECKBOX = 3, ST_SLIDER = 4, ST_BUTTON = 5, ST_DROPDOWN = 6,
-		AddAddon = function(_, title)
-			local panel = { title = title }
-			function panel:AddSetting(setting)
-				made[#made + 1] = setting
-			end
-			function panel:UpdateControls() end
-			return panel
-		end,
-	}
+	local lib = fakeLibrary()
+	LibHarvensAddonSettings = lib
 	addon = boot()
 	LibHarvensAddonSettings = nil
 	local counts = { [3] = 0, [4] = 0, [5] = 0, [6] = 0 }
-	for _, setting in ipairs(made) do
+	for _, setting in ipairs(lib.panel.settings) do
 		ok(setting.label ~= nil and not tostring(setting.label):find("^<"), "label resolved: " .. tostring(setting.label))
 		if setting.tooltip then
 			ok(not tostring(setting.tooltip):find("^<"), "tooltip resolved: " .. tostring(setting.label))
@@ -902,10 +1258,194 @@ do
 			setting.clickHandler()
 		end
 	end
-	eq(counts[4], 14, "fourteen sliders: block 4, name 3, bar 4, text 3")
-	eq(counts[3], 8, "eight checkboxes: four display, preview, three element toggles")
+	eq(counts[4], 29, "twenty-nine sliders: block 4, name 3, bar 4, text 3, colors 15")
+	eq(counts[3], 9, "nine checkboxes: follow new sets, four display, preview, three element toggles")
 	eq(counts[6], 2, "two font dropdowns")
-	eq(counts[5], 1, "one reset button")
+	eq(counts[5], 4, "four buttons: tick all, untick all, reset the colors, reset")
+	ok(labelled(lib.panel, GetString(SI_PBSPST_NO_SETS)) ~= nil, "no set worn yet: the list says so")
+	-- the colours: three sliders for each of the five states, 0..255 in steps of 5
+	local sliders = 0
+	local channelName = { R = SI_PBSPST_COLOR_RED, G = SI_PBSPST_COLOR_GREEN, B = SI_PBSPST_COLOR_BLUE }
+	for _, state in ipairs(addon.COLOR_STATES) do
+		for _, channel in ipairs({ "R", "G", "B" }) do
+			local key = "color" .. addon.COLOR_NAMES[state] .. channel
+			eq(addon.DEFAULTS[key] % 5, 0, key .. " default sits on a slider step")
+			local wanted = GetString(_G["SI_PBSPST_COLOR_" .. state:upper()]) .. " " .. GetString(channelName[channel])
+			local found = labelled(lib.panel, wanted)
+			ok(found == nil or found.type == 4, key .. " is a slider")
+			ok(found ~= nil, key .. " has a slider")
+			if found then
+				sliders = sliders + 1
+				eq(found.min, 0, key .. " from 0")
+				eq(found.max, 255, key .. " to 255")
+				eq(found.step, 5, key .. " in steps of 5")
+				found.setFunction(0)
+				eq(addon.sv[key], 0, key .. " is written")
+				found.setFunction(addon.DEFAULTS[key])
+			end
+		end
+	end
+	eq(sliders, 15, "fifteen color sliders")
+	local resetColors = labelled(lib.panel, GetString(SI_PBSPST_COLORS_RESET))
+	addon.sv.colorReadyR = 0
+	resetColors.clickHandler()
+	eq(addon.sv.colorReadyR, addon.DEFAULTS.colorReadyR, "the reset-colors button restores them")
+	eq(lib.panel.settings[1].type, 2, "the explanation comes first")
+end
+
+section("settings panel: choosing the sets to follow")
+do
+	local lib = fakeLibrary()
+	LibHarvensAddonSettings = lib
+	addon = boot()
+	local panel = lib.panel
+	eq(#setRows(panel), 0, "no sets listed before any is worn")
+
+	wear("martial", 5)
+	wear("zen", 5)
+	wearId(9002, 3) -- a stats-only set: nothing to follow
+	openPanel(lib)
+	local rows = setRows(panel)
+	eq(#rows, 2, "the worn sets with a timed effect are listed, the stats-only one is not")
+	eq(rows[1].label, setName("martial"), "the first set worn comes first")
+	eq(rows[2].label, setName("zen"), "then the next")
+	ok(labelled(panel, GetString(SI_PBSPST_NO_SETS)) == nil, "the empty-list note is gone")
+	eq(rows[1].getFunction(), true, "ticked by default")
+	eq(#visibleRows(), 2, "both sets have a row")
+
+	rows[1].setFunction(false)
+	eq(rows[1].getFunction(), false, "unticked: reads back as off")
+	eq(addon.sv.hidden[147], true, "saved as off")
+	eq(#visibleRows(), 1, "and its row goes at once")
+	eq(rows[2].getFunction(), true, "the other is untouched")
+	rows[1].setFunction(true)
+	eq(#visibleRows(), 2, "ticked again: the row is back")
+	eq(addon.sv.hidden[147], nil, "no longer off")
+	eq(addon.sv.selected[147], true, "and decided on")
+
+	-- stopping a set whose effect is running takes the row at once, timers or not
+	frame()
+	t0 = M.time
+	effect(EFFECT_RESULT_GAINED, AB.martial, 127070, 77, t0, t0 + 5)
+	frame()
+	rows[1].setFunction(false)
+	eq(#visibleRows(), 1, "unticked while its effect runs: the row still goes at once")
+	rows[1].setFunction(true)
+
+	-- the buttons
+	local before = panel.updates
+	labelled(panel, GetString(SI_PBSPST_TRACK_NONE)).clickHandler()
+	eq(rows[1].getFunction() or rows[2].getFunction(), false, "untick all: nothing is followed")
+	eq(#visibleRows(), 0, "no rows")
+	ok(top().hidden, "the window is hidden")
+	ok(panel.updates > before, "the panel was asked to redraw the ticks")
+	labelled(panel, GetString(SI_PBSPST_TRACK_ALL)).clickHandler()
+	eq(rows[1].getFunction() and rows[2].getFunction(), true, "tick all: both are followed")
+	eq(#visibleRows(), 2, "both rows are back")
+
+	-- the chat commands and the panel are one thing
+	slash("hide " .. setName("zen"):sub(1, 5))
+	eq(rows[2].getFunction(), false, "/procset hide shows as unticked")
+	slash("show " .. setName("zen"):sub(1, 5))
+	eq(rows[2].getFunction(), true, "/procset show as ticked")
+
+	-- a new set, with "follow newly worn sets" off, stays off until it is ticked
+	local trackNew = labelled(panel, GetString(SI_PBSPST_TRACK_NEW))
+	eq(trackNew.getFunction(), true, "newly worn sets are followed by default")
+	trackNew.setFunction(false)
+	eq(addon.sv.trackNew, false, "turned off")
+	wear("nightmare", 5)
+	eq(#visibleRows(), 2, "a set worn for the first time is not followed")
+	eq(M.listening(EVENT_COMBAT_EVENT), 1, "(the other two still are)")
+	local sets = table.concat((function()
+		M.chat = {}
+		slash("sets")
+		return M.chat
+	end)(), "\n")
+	ok(sets:find("not followed (turned off)", 1, true) ~= nil, "/procset sets says why it has no row")
+
+	-- the panel is still open and the list is what it was; the scene being shown brings the new set in
+	eq(#setRows(panel), 2, "the open panel has not heard of the new set yet")
+	lib.scene:Fire(SCENE_SHOWN)
+	rows = setRows(panel)
+	eq(#rows, 3, "the scene shown again: the list is current")
+	eq(rows[3].label, setName("nightmare"), "the new set is last")
+	eq(rows[3].getFunction(), false, "and unticked")
+	rows[3].setFunction(true)
+	eq(#visibleRows(), 3, "ticked: its row appears")
+	trackNew.setFunction(true)
+
+	-- nothing changed: showing the scene again leaves the list alone
+	local edits = panel.edits
+	lib.scene:Fire(SCENE_SHOWN)
+	eq(panel.edits, edits, "an unchanged list is not rebuilt")
+	-- another add-on's panel is the selected one: the scene being shown is not about this panel
+	panel.selected = false
+	wearId(9001, 3)
+	lib.scene:Fire(SCENE_SHOWN)
+	eq(panel.edits, edits, "not this panel's scene: not rebuilt")
+	panel.selected = true
+	lib.scene:Fire(SCENE_SHOWN)
+	eq(#setRows(panel), 4, "this panel's scene: the new set is in")
+
+	-- a set taken off stays on the list, marked, after the sets worn
+	wear("martial", 0)
+	lib.scene:Fire(SCENE_SHOWN)
+	rows = setRows(panel)
+	eq(#rows, 4, "an unworn set is still listed")
+	eq(rows[4].label, setName("martial") .. "  " .. GetString(SI_PBSPST_SET_NOT_WORN), "last, and marked as not worn")
+	eq(rows[4].getFunction(), true, "with its decision")
+	ok(addon.sv.known[147], "sets seen worn are remembered")
+
+	-- a list longer than the panel shows
+	for index = 1, 45 do
+		M.sets[30000 + index] = { name = string.format("Bulk Set %02d", index), bonuses = { { 5, "Gain Major Sorcery for 5 seconds. This effect can occur once every 9 seconds." } } }
+		addon.sv.known[30000 + index] = true
+	end
+	lib.scene:Fire(SCENE_SHOWN)
+	eq(#setRows(panel), 40, "at most forty sets are listed")
+	local total = #addon:TrackableSets()
+	ok(labelled(panel, string.format(GetString(SI_PBSPST_MORE_SETS), total - 40)) ~= nil, "and the rest is counted")
+
+	-- reset
+	labelled(panel, GetString(SI_PBSPST_RESET)).clickHandler()
+	eq(next(addon.sv.selected), nil, "reset: no set is decided about by hand")
+	eq(addon.sv.trackNew, true, "and new sets are followed")
+	ok(addon.sv.known[147], "what was seen worn is kept")
+	LibHarvensAddonSettings = nil
+end
+
+section("settings panel: saved data from before the list of sets")
+do
+	-- 0.3.1 saved no selected / trackNew / known; the defaults fill them in, and the old hidden stays
+	M.persist = { hidden = { [147] = true }, bind = {}, ignore = {}, posX = -905 }
+	local lib = fakeLibrary()
+	LibHarvensAddonSettings = lib
+	addon = boot()
+	eq(type(addon.sv.selected), "table", "selected is there")
+	eq(addon.sv.trackNew, true, "new sets are followed")
+	wear("martial", 5)
+	wear("zen", 5)
+	eq(#visibleRows(), 1, "the set switched off in the old data stays off")
+	openPanel(lib)
+	local rows = setRows(lib.panel)
+	eq(#rows, 2, "and is listed")
+	eq(rows[1].getFunction(), false, "unticked")
+	-- the next session: the sets worn before are on the list although nothing is worn
+	rows[1].setFunction(true)
+	M.worn = {}
+	addon = boot()
+	openPanel(lib)
+	local again = setRows(lib.panel)
+	eq(#again, 2, "after a reload the sets seen before are still listed")
+	local marked = {}
+	for _, row in ipairs(again) do
+		marked[row.label] = true
+	end
+	ok(marked[setName("martial") .. "  " .. GetString(SI_PBSPST_SET_NOT_WORN)], "marked as not worn")
+	ok(marked[setName("zen") .. "  " .. GetString(SI_PBSPST_SET_NOT_WORN)], "both of them")
+	M.persist = nil
+	LibHarvensAddonSettings = nil
 end
 
 -- ======================================================================================

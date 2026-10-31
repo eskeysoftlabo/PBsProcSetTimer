@@ -108,6 +108,21 @@ T.variants = {
 	},
 }
 
+-- One bonus line holding two effects, each closing with its own cooldown sentence.
+T.twin = {
+	en = "When you cast a spell, gain Major Courage for 6 seconds. This effect can occur once every 12 seconds. When you block, restore Stamina and gain Minor Heroism for 3 seconds. This effect can occur once every 20 seconds.",
+	jp = "魔法を使うと6秒間、勇気を得る。この効果は12秒に1回発生する。ブロックすると3秒間、英雄を得る。この効果は20秒に1回発生する。",
+	de = "Wenn du einen Zauber wirkst, erhältst du für 6 Sekunden Mut. Dieser Effekt kann alle 12 Sekunden auftreten. Wenn du blockst, erhältst du für 3 Sekunden Heldentum. Dieser Effekt kann alle 20 Sekunden auftreten.",
+}
+
+-- Wretched Vitality: one bonus line, two effects, no cooldown sentence at all (UESP wording).
+T.wretched = {
+	en = "While in combat, applying a Major Buff or Debuff with a duration to a target grants you 260 Magicka and Stamina Recovery for 15 seconds. While in combat, applying a Minor Buff or Debuff with a duration to a target grants you 130 Magicka and Stamina Recovery for 15 seconds.",
+	jp = "戦闘中、対象に持続時間のあるメジャーバフまたはデバフを付与すると、15秒間、マジカとスタミナ回復が260増加する。戦闘中、対象に持続時間のあるマイナーバフまたはデバフを付与すると、15秒間、マジカとスタミナ回復が130増加する。",
+	jp2 = "戦闘中、メジャーバフを付与すると、15秒の間、回復が260増加する。戦闘中、マイナーバフを付与すると、15秒の間、回復が130増加する。",
+	de = "Im Kampf erhältst du, wenn du ein Major-Buff oder -Debuff auf ein Ziel wirkst, für 15 Sekunden 260 Magicka- und Ausdauererholung. Im Kampf erhältst du, wenn du ein Minor-Buff oder -Debuff auf ein Ziel wirkst, für 15 Sekunden 130 Magicka- und Ausdauererholung.",
+}
+
 -- Sets made up for the tests of "any set". { name, max pieces, bonuses }; a bonus is
 -- { pieces needed, text, perfected? }.
 T.extra = {
@@ -138,6 +153,14 @@ T.extra = {
 			{ 5, "Your attacks grant Empower for 7 seconds. This effect can occur once every 15 seconds.", true },
 		},
 	},
+}
+T.extra[9202] = {
+	name = "Wretched Test Set",
+	bonuses = { { 2, "Adds 1000 Health" }, { 5, T.wretched.en } },
+}
+T.extra[9201] = {
+	name = "Twin Effect Set",
+	bonuses = { { 2, "Adds 1000 Health" }, { 5, T.twin.en } },
 }
 for index = 1, 10 do
 	T.extra[9100 + index] = {

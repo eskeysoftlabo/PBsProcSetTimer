@@ -22,8 +22,10 @@
 --     which events are the proc         ability names, see below
 --     how long a debuff really has      endTime of EVENT_EFFECT_CHANGED
 --
--- A set gets a row when one of its bonus lines has a cooldown or a duration in its text and
--- the worn pieces switch that line on. Of several such lines, the highest one that is on.
+-- Every timed EFFECT gets a row of its own, with its own cooldown and its own abilities: a
+-- bonus line that has a cooldown or a duration in its text and that the worn pieces switch on is
+-- an effect (bonus lines add up, so a set can have several on at once), and a line with two or
+-- more cooldown sentences is cut into one effect per sentence (Parse.lua).
 --
 -- ---------------------------------------------------------------------------------------
 -- HOW A PROC IS RECOGNISED
@@ -38,17 +40,20 @@
 --     EVENT_COMBAT_EVENT     a hit (glass shards bursting). The client no longer reports effect
 --                            gain/fade through it, so a pure buff never shows up here.
 --
--- An event belongs to a worn set by its ability NAME (as the client localised it), in two tiers:
+-- An event belongs to a worn effect by its ability NAME (as the client localised it), in two tiers:
 --
---     1. the name is the set's name, part of it, or contains it;
---     2. for an effect only: the name appears word for word in the proc bonus' text AND the
+--     1. the name is the set's name, part of it, or contains it. A set with several effects on
+--        then needs one picked (see Pick): by the effect's own words, by the numbers the
+--        ability's description shares with them, by the buff's length, by the kind of event,
+--        and last by which effect no other ability has driven yet;
+--     2. for an effect only: the name appears word for word in an effect's text AND the
 --        effect lasts as long as that text says. The second condition is what keeps a
 --        standard buff named in many bonus texts ("Major Brutality") from being taken for a
 --        proc every time one of your own skills applies it.
 --
 -- Names are only a heuristic and have not been measured on a console: /procset status lists
 -- what was matched, /procset probe lists everything else, /procset bind pins an ability id to
--- a set by hand and /procset ignore removes one that was matched wrongly.
+-- a set (or one effect of it) by hand and /procset ignore removes one that was matched wrongly.
 --
 -- The cooldown starts when the proc fires and ignores further events until it is over, so a
 -- burst that hits five enemies at once counts once.
@@ -59,11 +64,14 @@ if PBS_PROCSETTIMER then
 	return
 end
 
+local DISPLAY_NAME = "PB’s Proc Set Timer"
+
 local addon = {
 	name = "PBsProcSetTimer",
-	title = "PB’s Proc Set Timer",
+	displayName = DISPLAY_NAME,
+	title = DISPLAY_NAME, -- gets the version added once the manifest is read: this is the name in the add-on list
 	author = "PinkBanther",
-	version = "0.2.1", -- keep in step with ## Version in the manifest
+	version = "", -- read from the manifest's ## Title line, see ReadManifestVersion
 }
 PBS_PROCSETTIMER = addon
 
@@ -71,7 +79,7 @@ local em = EVENT_MANAGER
 local wm = WINDOW_MANAGER
 
 local MAX_ROWS = 8 -- more sets than this with a timer is beyond what is worn at once
-local PREVIEW_ROWS = 3
+local PREVIEW_ROWS = 5 -- one sample row for each colour
 local FRESH_SECONDS = 0.75 -- an effect that began this recently is a new proc
 local MERGE_SECONDS = 0.25 -- one proc can report several events; they count once
 local FLASH_SECONDS = 0.35
@@ -102,6 +110,24 @@ addon.DEFAULTS = {
 	scale = 100,
 	rowHeight = 36,
 
+	-- The colour of each state, red / green / blue from 0 to 255. The bar and the text beside it
+	-- share it. Steps of 5, so the panel's sliders land on them.
+	colorActiveR = 90,
+	colorActiveG = 230,
+	colorActiveB = 100,
+	colorCooldownR = 255,
+	colorCooldownG = 155,
+	colorCooldownB = 50,
+	colorReadyR = 100,
+	colorReadyG = 205,
+	colorReadyB = 255,
+	colorIdleR = 140,
+	colorIdleG = 140,
+	colorIdleB = 140,
+	colorFlashR = 255,
+	colorFlashG = 255,
+	colorFlashB = 255,
+
 	nameShow = true,
 	nameX = 0,
 	nameY = 0,
@@ -120,9 +146,12 @@ addon.DEFAULTS = {
 	textWidth = 220,
 	textFont = 22,
 
-	bind = {}, -- [abilityId] = setId, pinned by hand with /procset bind
+	bind = {}, -- [abilityId] = setId | { set = setId, line = pieces, k = n }, pinned by hand with /procset bind
 	ignore = {}, -- [abilityId] = true, never matched
-	hidden = {}, -- [setId] = true, no row for this set
+	hidden = {}, -- [setId] = true, this set is not followed (/procset hide, or unticked in the panel)
+	selected = {}, -- [setId] = true, this set is followed whatever trackNew says
+	trackNew = true, -- a set nobody decided about is followed
+	known = {}, -- [setId] = true, sets with a timed effect seen worn: the panel lists them later too
 }
 
 -- Direct hits. Damage-over-time and heal-over-time ticks are left out on purpose: a ticking
@@ -146,9 +175,13 @@ for _, suffix in ipairs({
 end
 
 -- ---- state --------------------------------------------------------------------------
-local recs = {} -- every set seen worn this session, in the order first seen
-local recById = {}
-local activeRecs = {} -- the recs with a bonus line on right now (and not hidden)
+-- A set is what is worn: its pieces, its name, its text. A rec is the timer of ONE timed effect of
+-- a set. A set whose bonus lines hold three timed effects gets up to three recs, each with its own
+-- row, cooldown and matched abilities, so they run independently of one another.
+local sets = {} -- every set seen worn this session, in the order first seen
+local setById = {}
+local recs = {} -- every timer made for those sets
+local activeRecs = {} -- the recs with a row: switched on by the worn pieces, or still running
 -- [abilityId] = rec | false, one table per kind of event; cleared whenever the sets change
 local verdictEffect = {}
 local verdictHit = {}
@@ -179,15 +212,54 @@ local function Log(text, ...)
 	end
 end
 
-local function NewRec(setId)
+-- Cuts a text short on a character boundary (the text may be Japanese: UTF-8 bytes 128..191
+-- continue a character and must not be the first byte left out).
+local function Clip(text, bytes)
+	if #text <= bytes then
+		return text
+	end
+	local cut = bytes
+	while cut > 0 do
+		local byte = text:byte(cut + 1)
+		if byte and byte >= 128 and byte < 192 then
+			cut = cut - 1
+		else
+			break
+		end
+	end
+	return text:sub(1, cut) .. "..."
+end
+
+-- What the game says an ability does, on one line; "" when it says nothing.
+local function Describe(abilityId)
+	if type(GetAbilityDescription) ~= "function" or not abilityId or abilityId <= 0 then
+		return ""
+	end
+	local text = GetAbilityDescription(abilityId)
+	if not text or text == "" then
+		return ""
+	end
+	return Clip((addon.NormalizeText(text):gsub("%s+", " ")), 90)
+end
+
+local function NewSet(setId)
 	return {
 		setId = setId,
 		name = nil, -- the game's own name for the set
 		count = 0, -- worn pieces, Perfected ones included
 		perfected = 0,
 		info = nil, -- addon.ReadSetEffect result; false if the game has no such set
-		bonus = nil, -- the bonus line this row follows, nil when there is no row
-		live = false, -- the worn pieces switch that line on right now
+		recs = {}, -- [effect.key] = the timer of that effect, made when it first switched on
+	}
+end
+
+local function NewRec(set, effect)
+	return {
+		set = set,
+		setId = set.setId,
+		bonus = effect, -- the effect this timer follows: its pieces, its text, its times
+		active = false, -- has a row
+		live = false, -- the worn pieces switch the effect's line on right now
 		offSince = nil, -- since when the reading has said it is off
 		cdUntil = 0,
 		cdTotal = 0,
@@ -205,14 +277,30 @@ end
 
 -- The game's own name for the set, in the player's language. Looked up on demand so a set
 -- that is not worn is still labelled correctly.
-local function SetDisplayName(rec)
-	if not rec.name or rec.name == "" then
-		local name = GetItemSetName(rec.setId)
+local function SetName(set)
+	if not set.name or set.name == "" then
+		local name = GetItemSetName(set.setId)
 		if name and name ~= "" then
-			rec.name = name
+			set.name = name
 		end
 	end
-	return rec.name or ("#" .. rec.setId)
+	return set.name or ("#" .. set.setId)
+end
+
+-- What a row is called. A set with one timed effect is just its name; a set with several says
+-- which one the row is: the pieces its line needs, and the effect's number when a line holds
+-- more than one.
+local function RecLabel(rec)
+	local name = SetName(rec.set)
+	local info = rec.set.info
+	if not info or info.effectCount < 2 then
+		return name
+	end
+	local effect = rec.bonus
+	if effect.n > 1 then
+		return string.format("%s (%d-%d)", name, effect.required, effect.k)
+	end
+	return string.format("%s (%d)", name, effect.required)
 end
 
 local function ResetTimers(rec)
@@ -223,7 +311,7 @@ local function ResetTimers(rec)
 	rec.actTotal = 0
 	rec.units = {}
 	rec.flashUntil = 0
-	-- a new bonus line, a zone change: what fired before says nothing about the next proc
+	-- a new row, a zone change: what fired before says nothing about the next proc
 	rec.lastProc = -1000
 end
 
@@ -232,17 +320,17 @@ local function ClearVerdicts()
 	verdictHit = {}
 end
 
--- ---- matching events to sets --------------------------------------------------------
+-- ---- matching events to effects -----------------------------------------------------
 -- Tier 1: the name and the set's name are the same thing, or one holds the other.
-local function NameOfSet(rec, name)
-	local setName = rec.name
+local function NameOfSet(set, name)
+	local setName = set.name
 	-- an empty set name would be "contained" in every ability name
 	return setName ~= nil
 		and setName ~= ""
 		and (name == setName or setName:find(name, 1, true) ~= nil or name:find(setName, 1, true) ~= nil)
 end
 
--- Tier 2: the name is written in the bonus text, and the effect lasts as long as the text says.
+-- Tier 2: the name is written in the effect's text, and the effect lasts as long as the text says.
 local function NameInText(rec, name, length)
 	local bonus = rec.bonus
 	if not length or not bonus.duration or math.abs(length - bonus.duration) > DURATION_TOLERANCE then
@@ -251,7 +339,141 @@ local function NameInText(rec, name, length)
 	return bonus.text:find(name, 1, true) ~= nil
 end
 
--- The set an ability belongs to, or nil. Decided once per ability id and kind of event: this
+-- The numbers in a text, as a set of values ("260", "1,5" -> 260, 1.5); `skip` values are left out.
+local function NumbersOf(text, skip)
+	local out = {}
+	for digits in text:gmatch("%d+[%.,]?%d*") do
+		local value = tonumber((digits:gsub(",", ".")))
+		if value and not (skip and skip[value]) then
+			out[value] = true
+		end
+	end
+	return out
+end
+
+-- The numbers an effect's text names other than its own times: "260", "130".
+local function EffectNumbers(effect)
+	if not effect.numbers then
+		local skip = {}
+		for _, seconds in ipairs({ effect.cooldown or -1, effect.duration or -1, effect.delay or -1 }) do
+			skip[seconds] = true
+		end
+		effect.numbers = NumbersOf(effect.text, skip)
+	end
+	return effect.numbers
+end
+
+-- A name that belongs to a set (tier 1 says so, or the user pinned it) says nothing about WHICH of
+-- the set's effects it is. With one effect on there is no question. With several, the candidates
+-- are narrowed step by step -- a step that would leave none changes nothing:
+--
+--     1. the effect's own text names the ability, and its duration agrees with the buff's length;
+--     2. the ability's own description quotes the numbers of the effect's text ("260");
+--     3. the effect lasts as long as the buff does;
+--     4. the effect's text names the ability;
+--     5. the kind of event: a buff or debuff (it has a length) belongs to an effect that lasts,
+--        a hit to one that is instant.
+--
+-- What is still left is told apart by the abilities seen so far: the effect this ability already
+-- drove, else one no ability has driven yet (two effects of one set are two abilities), else the
+-- first. The first-come step can swap two effects that look alike; /procset status shows which
+-- ability drives which, and bind corrects it.
+local function Pick(set, abilityId, name, length)
+	local pool = {}
+	for _, rec in ipairs(activeRecs) do
+		if rec.set == set then
+			pool[#pool + 1] = rec
+		end
+	end
+	if #pool <= 1 then
+		return pool[1]
+	end
+
+	local function narrow(test)
+		local kept = {}
+		for _, rec in ipairs(pool) do
+			if test(rec) then
+				kept[#kept + 1] = rec
+			end
+		end
+		if #kept > 0 then
+			pool = kept
+		end
+	end
+
+	narrow(function(rec)
+		return NameInText(rec, name, length)
+	end)
+
+	if type(GetAbilityDescription) == "function" and abilityId and abilityId > 0 then
+		local description = GetAbilityDescription(abilityId)
+		if description and description ~= "" then
+			local described = NumbersOf(addon.NormalizeText(description))
+			local best, scores = 0, {}
+			for index, rec in ipairs(pool) do
+				local score = 0
+				for value in pairs(EffectNumbers(rec.bonus)) do
+					if described[value] then
+						score = score + 1
+					end
+				end
+				scores[rec] = score
+				best = zo_max(best, score)
+			end
+			if best > 0 then
+				narrow(function(rec)
+					return scores[rec] == best
+				end)
+			end
+		end
+	end
+
+	if length then
+		narrow(function(rec)
+			local duration = rec.bonus.duration
+			return duration ~= nil and math.abs(length - duration) <= DURATION_TOLERANCE
+		end)
+	end
+	narrow(function(rec)
+		return name ~= nil and rec.bonus.text:find(name, 1, true) ~= nil
+	end)
+	narrow(function(rec)
+		return (length ~= nil) == (rec.bonus.duration ~= nil)
+	end)
+
+	for _, rec in ipairs(pool) do
+		if rec.seen[abilityId] then
+			return rec
+		end
+	end
+	for _, rec in ipairs(pool) do
+		if next(rec.seen) == nil then
+			return rec
+		end
+	end
+	return pool[1]
+end
+
+-- A pinned ability: a set id (the whole set, Pick decides) or { set, line, k } (one effect, the
+-- line named by the pieces it needs).
+local function Pinned(pinned, abilityId, name, length)
+	local isEffect = type(pinned) == "table"
+	local set = setById[isEffect and pinned.set or pinned]
+	if not set then
+		return false
+	end
+	if not isEffect then
+		return Pick(set, abilityId, name, length) or false
+	end
+	for _, rec in ipairs(activeRecs) do
+		if rec.set == set and rec.bonus.required == pinned.line and rec.bonus.k == pinned.k then
+			return rec
+		end
+	end
+	return false
+end
+
+-- The effect an ability belongs to, or nil. Decided once per ability id and kind of event: this
 -- runs for every combat event of the player, so the answer is cached until the worn sets
 -- change. `length` is the effect's length in seconds, nil for a hit.
 local function Match(cache, abilityId, name, length)
@@ -266,12 +488,11 @@ local function Match(cache, abilityId, name, length)
 	if sv.ignore[abilityId] then
 		hit = false
 	elseif pinned then
-		local rec = recById[pinned]
-		hit = (rec and rec.bonus) and rec or false
+		hit = Pinned(pinned, abilityId, name, length)
 	elseif name and #name >= MIN_NAME_BYTES then
 		for _, rec in ipairs(activeRecs) do
-			if NameOfSet(rec, name) then
-				hit = rec
+			if NameOfSet(rec.set, name) then
+				hit = Pick(rec.set, abilityId, name, length)
 				break
 			end
 		end
@@ -284,7 +505,7 @@ local function Match(cache, abilityId, name, length)
 			end
 		end
 	end
-	cache[abilityId] = hit
+	cache[abilityId] = hit or false
 	return hit or nil
 end
 
@@ -306,7 +527,7 @@ local function Probe(kind, abilityId, name, detail)
 		return
 	end
 	state.probeSeen[abilityId] = true
-	d(string.format("[ProcSet probe] %s %d %s %s", kind, abilityId or 0, name or "?", detail or ""))
+	d(string.format("[ProcSet probe] %s %d %s %s  %s", kind, abilityId or 0, name or "?", detail or "", Describe(abilityId)))
 end
 
 -- ---- the timers ---------------------------------------------------------------------
@@ -451,24 +672,39 @@ local function RefreshEvents()
 end
 
 -- ---- worn sets ----------------------------------------------------------------------
--- The bonus line a row follows: the highest one that has a time in its text and that the worn
--- pieces switch on. A Perfected bonus counts Perfected pieces only, as the item tooltip does.
-local function SelectBonus(rec)
-	local bonuses = rec.info and rec.info.bonuses
-	if not bonuses then
-		return nil
+-- The timed effects the worn pieces switch on: those of every bonus line whose pieces are worn
+-- (bonus lines add up, they do not replace one another). A Perfected bonus counts Perfected
+-- pieces only, as the item tooltip does. Returned as { [effect.key] = effect }.
+local function WornEffects(set)
+	local on = {}
+	local lines = set.info and set.info.bonuses
+	if not lines then
+		return on
 	end
-	for index = #bonuses, 1, -1 do
-		local bonus = bonuses[index]
-		local relevant = bonus.perfected and rec.perfected or rec.count
-		if bonus.timed and relevant >= bonus.required then
-			return bonus
+	for _, line in ipairs(lines) do
+		local relevant = line.perfected and set.perfected or set.count
+		if line.timed and relevant >= line.required then
+			for _, effect in ipairs(line.effects) do
+				on[effect.key] = effect
+			end
 		end
 	end
-	return nil
+	return on
 end
 
--- Whether a row still has something to show: its bonus is on, or the reading that says it is off
+-- Whether a set is followed at all. What the user decided about this very set comes first (off
+-- beats on); a set nobody decided about follows the default.
+local function Tracked(setId)
+	local sv = addon.sv
+	if sv.hidden[setId] then
+		return false
+	elseif sv.selected[setId] then
+		return true
+	end
+	return sv.trackNew ~= false
+end
+
+-- Whether a row still has something to show: its effect is on, or the reading that says it is off
 -- is younger than GRACE_SECONDS, or an effect or a cooldown it started is still running (an
 -- effect already on an enemy outlives the bar swap that switched the bonus off).
 local function Showing(rec, now)
@@ -479,7 +715,7 @@ local function Showing(rec, now)
 end
 
 -- Reads every worn piece with the call the item tooltip uses (numNormalEquipped already leaves
--- out the weapon bar that is not in hand) and works out which sets have a row.
+-- out the weapon bar that is not in hand) and works out which effects have a row.
 local function Rescan()
 	local sv = addon.sv
 	local now = Now()
@@ -501,69 +737,82 @@ local function Rescan()
 	end
 
 	for _, setId in ipairs(order) do
-		if not recById[setId] then
-			local rec = NewRec(setId)
-			recById[setId] = rec
-			recs[#recs + 1] = rec
+		if not setById[setId] then
+			local set = NewSet(setId)
+			setById[setId] = set
+			sets[#sets + 1] = set
 		end
 	end
 
 	local changed = false
 	local active = {}
-	for _, rec in ipairs(recs) do
-		local piece = found[rec.setId]
+	for _, set in ipairs(sets) do
+		local piece = found[set.setId]
 		local count, perfected = piece and piece.total or 0, piece and piece.perfected or 0
-		if count ~= rec.count or perfected ~= rec.perfected then
+		if count ~= set.count or perfected ~= set.perfected then
 			-- both counts side by side: the one read from a worn item and the one the game keeps for the set
-			local _, _, _, bySet, bySetPerfected = GetItemSetInfo(rec.setId)
+			local _, _, _, bySet, bySetPerfected = GetItemSetInfo(set.setId)
 			Log("%s: %d -> %d piece(s), perfected %d -> %d; the game's count for the set: %s, perfected %s",
-				SetDisplayName(rec), rec.count, count, rec.perfected, perfected, tostring(bySet), tostring(bySetPerfected))
+				SetName(set), set.count, count, set.perfected, perfected, tostring(bySet), tostring(bySetPerfected))
 		end
-		rec.count = count
-		rec.perfected = perfected
+		set.count = count
+		set.perfected = perfected
 		if piece then
-			if not rec.name or rec.name == "" then
-				local name = GetItemSetName(rec.setId)
-				rec.name = (name and name ~= "") and name or piece.name
+			if not set.name or set.name == "" then
+				local name = GetItemSetName(set.setId)
+				set.name = (name and name ~= "") and name or piece.name
 			end
-			if rec.info == nil then
-				rec.info = addon.ReadSetEffect(rec.setId) or false
+			if set.info == nil then
+				set.info = addon.ReadSetEffect(set.setId) or false
+			end
+			-- remembered, so the panel can offer the set when it is not worn
+			if set.info and set.info.timed and not sv.known[set.setId] then
+				sv.known[set.setId] = true
 			end
 		end
 
-		local wanted = nil
-		if piece and rec.info and not sv.hidden[rec.setId] then
-			wanted = SelectBonus(rec)
+		local on = {}
+		if piece and set.info and Tracked(set.setId) then
+			on = WornEffects(set)
 		end
-		if wanted then
-			if wanted ~= rec.bonus then
-				-- a different line (or the first one): what ran under the old line says nothing
-				rec.bonus = wanted
-				ResetTimers(rec)
-				changed = true
+
+		-- every timed effect the set has, in the order of its text
+		for _, effect in ipairs(set.info and set.info.effects or {}) do
+			local rec = set.recs[effect.key]
+			if on[effect.key] then
+				if not rec then
+					rec = NewRec(set, effect)
+					set.recs[effect.key] = rec
+					recs[#recs + 1] = rec
+				end
+				if not rec.active then
+					rec.active = true
+					ResetTimers(rec)
+					changed = true
+				end
+				if not rec.live then
+					Log("%s: the %d-piece bonus is on", RecLabel(rec), effect.required)
+				end
+				rec.live = true
+				rec.offSince = nil
+			elseif rec and rec.active then
+				if rec.live then
+					rec.live = false
+					rec.offSince = now
+					Log("%s: its bonus is off (%d piece(s))", RecLabel(rec), count)
+				end
+				-- Off is not gone: the row stays while an effect or cooldown runs, or while the
+				-- reading may still be a dip. A set the user stopped following is the exception.
+				if not Tracked(set.setId) or not Showing(rec, now) then
+					Log("%s: row dropped", RecLabel(rec))
+					rec.active = false
+					ResetTimers(rec)
+					changed = true
+				end
 			end
-			if not rec.live then
-				Log("%s: the %d-piece bonus is on", SetDisplayName(rec), wanted.required)
+			if rec and rec.active then
+				active[#active + 1] = rec
 			end
-			rec.live = true
-			rec.offSince = nil
-		else
-			if rec.live then
-				rec.live = false
-				rec.offSince = now
-				Log("%s: no bonus with a time is on (%d piece(s))", SetDisplayName(rec), count)
-			end
-			-- Off is not gone: the row stays while an effect or cooldown runs, or while the
-			-- reading may still be a dip. The user's own "hide" is the exception.
-			if rec.bonus and (sv.hidden[rec.setId] or not Showing(rec, now)) then
-				Log("%s: row dropped", SetDisplayName(rec))
-				rec.bonus = nil
-				ResetTimers(rec)
-				changed = true
-			end
-		end
-		if rec.bonus then
-			active[#active + 1] = rec
 		end
 	end
 
@@ -576,13 +825,16 @@ local function Rescan()
 end
 
 -- ---- UI -----------------------------------------------------------------------------
-local COLORS = {
-	active = { 0.35, 0.9, 0.4 },
-	cooldown = { 1, 0.6, 0.2 },
-	ready = { 0.4, 0.8, 1 },
-	idle = { 0.55, 0.55, 0.55 },
-	flash = { 1, 1, 1 },
-}
+-- The states a row is painted in, and the stem of their saved-variable keys (colorActiveR ...).
+addon.COLOR_STATES = { "active", "cooldown", "ready", "idle", "flash" }
+addon.COLOR_NAMES = { active = "Active", cooldown = "Cooldown", ready = "Ready", idle = "Idle", flash = "Flash" }
+
+-- A state's colour as the controls want it, 0..1 each.
+local function ColorOf(colorKey)
+	local sv = addon.sv
+	local stem = "color" .. addon.COLOR_NAMES[colorKey]
+	return sv[stem .. "R"] / 255, sv[stem .. "G"] / 255, sv[stem .. "B"] / 255
+end
 
 local function Solid(name, parent, r, g, b, a)
 	local tex = wm:CreateControl(name, parent, CT_TEXTURE)
@@ -726,7 +978,7 @@ function Relayout()
 			end
 			local detected = next(rec.seen) ~= nil
 			if not sv.onlyDetected or detected then
-				Place(row, SetDisplayName(rec))
+				Place(row, RecLabel(rec))
 				row.rec = rec
 			end
 		end
@@ -752,9 +1004,9 @@ end
 local function Paint(row, colorKey, width, text)
 	if row.lastColor ~= colorKey then
 		row.lastColor = colorKey
-		local c = COLORS[colorKey]
-		row.fill:SetColor(c[1], c[2], c[3], 0.9)
-		row.text:SetColor(c[1], c[2], c[3], 1)
+		local r, g, b = ColorOf(colorKey)
+		row.fill:SetColor(r, g, b, 0.9)
+		row.text:SetColor(r, g, b, 1)
 	end
 	if row.lastWidth ~= width then
 		row.lastWidth = width
@@ -766,15 +1018,20 @@ local function Paint(row, colorKey, width, text)
 	end
 end
 
--- Sample rows for placing the display: one of each state.
+-- Sample rows for placing the display and trying the colours: one of each state. An idle row has
+-- no bar, only its text; the last one is the flash of a proc held still.
 local function UpdateSample(row)
 	local barWidth = addon.sv.barWidth
 	if row.sample == 1 then
 		Paint(row, "active", zo_floor(barWidth * 0.64), GetString(SI_PBSPST_PREVIEW_ROW))
 	elseif row.sample == 2 then
 		Paint(row, "cooldown", zo_floor(barWidth * 0.6), string.format(GetString(SI_PBSPST_COOLDOWN), 4.8))
-	else
+	elseif row.sample == 3 then
 		Paint(row, "ready", barWidth, GetString(SI_PBSPST_READY))
+	elseif row.sample == 4 then
+		Paint(row, "idle", 0, GetString(SI_PBSPST_IDLE))
+	else
+		Paint(row, "flash", zo_floor(barWidth * 0.64), GetString(SI_PBSPST_PREVIEW_ROW))
 	end
 end
 
@@ -882,6 +1139,98 @@ function addon:Set(key, value)
 	Rescan() -- a hidden/shown change can add or remove a row
 end
 
+-- Follow a set (true) or not (false): the user's decision about that very set, which outranks
+-- the default for new sets. `quiet` skips the rescan when many are set at once.
+function addon:SetTracked(setId, value, quiet)
+	local sv = self.sv
+	if value then
+		sv.hidden[setId] = nil
+		sv.selected[setId] = true
+	else
+		sv.hidden[setId] = true
+		sv.selected[setId] = nil
+	end
+	if not quiet then
+		Rescan()
+	end
+end
+
+function addon:IsTracked(setId)
+	return Tracked(setId)
+end
+
+-- The sets the panel offers, as { setId, name, worn }: those worn now that have a timed effect,
+-- then the others seen worn before (or decided about by hand), by name. `noScan` leaves the worn
+-- items unread, for the time the add-on is still loading.
+function addon:TrackableSets(noScan)
+	if not noScan then
+		Rescan()
+	end
+	local sv = self.sv
+	local list, listed = {}, {}
+	for _, set in ipairs(sets) do
+		if set.count > 0 and set.info and set.info.timed then
+			listed[set.setId] = true
+			list[#list + 1] = { setId = set.setId, name = SetName(set), worn = true }
+		end
+	end
+
+	local others = {}
+	local function Other(setId)
+		if listed[setId] then
+			return
+		end
+		listed[setId] = true
+		local set = setById[setId]
+		local info = set and set.info
+		if info == nil or info == false then
+			info = addon.ReadSetEffect(setId)
+		end
+		if info and info.timed then
+			local name = set and SetName(set) or GetItemSetName(setId)
+			if not name or name == "" then
+				name = "#" .. setId
+			end
+			others[#others + 1] = { setId = setId, name = name, worn = false }
+		end
+	end
+	for _, record in ipairs({ sv.known, sv.hidden, sv.selected }) do
+		for setId in pairs(record) do
+			Other(setId)
+		end
+	end
+	table.sort(others, function(a, b)
+		local x, y = zo_strlower(a.name), zo_strlower(b.name)
+		if x ~= y then
+			return x < y
+		end
+		return a.setId < b.setId
+	end)
+	for _, entry in ipairs(others) do
+		list[#list + 1] = entry
+	end
+	return list
+end
+
+-- Follow every set the panel lists, or none of them.
+function addon:SetAllTracked(value)
+	for _, entry in ipairs(self:TrackableSets()) do
+		self:SetTracked(entry.setId, value, true)
+	end
+	Rescan()
+end
+
+-- Back to the colours the add-on ships with.
+function addon:ResetColors()
+	for _, state in ipairs(self.COLOR_STATES) do
+		for _, channel in ipairs({ "R", "G", "B" }) do
+			local key = "color" .. self.COLOR_NAMES[state] .. channel
+			self.sv[key] = self.DEFAULTS[key]
+		end
+	end
+	self:ApplyLayout() -- repaints every row
+end
+
 function addon:SetPreview(value)
 	self.preview = value
 	Relayout()
@@ -896,6 +1245,7 @@ function addon:Reset()
 	self.sv.bind = {}
 	self.sv.ignore = {}
 	self.sv.hidden = {}
+	self.sv.selected = {}
 	ClearVerdicts()
 	self:ApplyLayout()
 	Rescan()
@@ -907,44 +1257,77 @@ local function Seconds(value)
 end
 
 -- A worn set by id or by part of its name (the sets worn at some point this session).
-local function FindRec(argument)
+local function FindSet(argument)
 	local id = tonumber(argument)
 	if id then
-		return recById[id], id
+		return setById[id], id
 	end
 	argument = zo_strlower(argument or "")
 	if argument == "" then
 		return nil
 	end
-	for _, rec in ipairs(recs) do
-		if zo_strlower(SetDisplayName(rec)):find(argument, 1, true) then
-			return rec, rec.setId
+	for _, set in ipairs(sets) do
+		if zo_strlower(SetName(set)):find(argument, 1, true) then
+			return set, set.setId
 		end
 	end
 	return nil
 end
 
-local function WhyNoRow(rec)
-	if addon.sv.hidden[rec.setId] then
-		return "hidden"
-	elseif rec.info == false then
+local function WhyNoRow(set)
+	if not Tracked(set.setId) then
+		return "not followed (turned off)"
+	elseif set.info == false then
 		return "the game has no such set"
-	elseif rec.count == 0 then
+	elseif set.count == 0 then
 		return "not worn"
-	elseif not rec.info.timed then
+	elseif not set.info.timed then
 		return "no time in any bonus text"
 	end
 	return "worn pieces switch on no bonus that has a time"
 end
 
+-- The rows a set has right now.
+local function RecsOf(set)
+	local mine = {}
+	for _, rec in ipairs(activeRecs) do
+		if rec.set == set then
+			mine[#mine + 1] = rec
+		end
+	end
+	return mine
+end
+
+-- "5-piece bonus", "5-piece bonus, effect 2 of 2", and why it is there if its bonus is off.
+local function EffectName(rec)
+	local bonus = rec.bonus
+	local text = string.format("%d-piece bonus", bonus.required)
+	if bonus.n > 1 then
+		text = text .. string.format(", effect %d of %d", bonus.k, bonus.n)
+	end
+	if not rec.live then
+		text = text .. " (switched off, kept while its timers run)"
+	end
+	return text
+end
+
 local function PrintSets()
 	local worn = 0
-	for _, rec in ipairs(recs) do
-		if rec.count > 0 or rec.bonus or addon.sv.hidden[rec.setId] then
+	for _, set in ipairs(sets) do
+		local mine = RecsOf(set)
+		if set.count > 0 or #mine > 0 or not Tracked(set.setId) then
 			worn = worn + 1
-			local detail = rec.bonus and string.format("row: %d-piece bonus%s", rec.bonus.required, rec.live and "" or " (switched off, kept while its timers run)")
-				or ("no row: " .. WhyNoRow(rec))
-			d(string.format("%s (id %d): %d piece(s) -- %s", SetDisplayName(rec), rec.setId, rec.count, detail))
+			local detail
+			if #mine > 0 then
+				local parts = {}
+				for _, rec in ipairs(mine) do
+					parts[#parts + 1] = EffectName(rec)
+				end
+				detail = (#parts > 1 and "rows: " or "row: ") .. table.concat(parts, "; ")
+			else
+				detail = "no row: " .. WhyNoRow(set)
+			end
+			d(string.format("%s (id %d): %d piece(s) -- %s", SetName(set), set.setId, set.count, detail))
 		end
 	end
 	if worn == 0 then
@@ -953,33 +1336,26 @@ local function PrintSets()
 end
 
 local function PrintStatus()
-	for _, rec in ipairs(recs) do
-		local bonus = rec.bonus
-		if rec.count > 0 or bonus then
-			d(
-				string.format(
-					"%s (id %d): %d piece(s)%s",
-					SetDisplayName(rec),
-					rec.setId,
-					rec.count,
-					bonus and string.format(", following the %d-piece bonus%s", bonus.required, rec.live and "" or " (switched off, kept while its timers run)")
-						or (", no row: " .. WhyNoRow(rec))
-				)
-			)
+	for _, set in ipairs(sets) do
+		local mine = RecsOf(set)
+		if set.count > 0 or #mine > 0 then
+			d(string.format("%s (id %d): %d piece(s)%s", SetName(set), set.setId, set.count, #mine == 0 and (", no row: " .. WhyNoRow(set)) or ""))
 		end
-		if bonus then
+		for _, rec in ipairs(mine) do
+			local bonus = rec.bonus
+			d("  following the " .. EffectName(rec))
 			d(
 				string.format(
-					"  read from the text: duration %s, cooldown %s, delay %s%s",
+					"    read from the text: duration %s, cooldown %s, delay %s%s",
 					Seconds(bonus.duration),
 					Seconds(bonus.cooldown),
 					Seconds(bonus.delay),
 					bonus.inferred and " (a time was placed by its position, not by its wording)" or ""
 				)
 			)
-			d(string.format("  procs %d, other players' events skipped %d", rec.procs, rec.foreign))
+			d(string.format("    procs %d, other players' events skipped %d", rec.procs, rec.foreign))
 			for abilityId, entry in pairs(rec.seen) do
-				d(string.format("  matched %s %d %s x%d", entry.kind, abilityId, entry.name or "?", entry.n))
+				d(string.format("    matched %s %d %s x%d  %s", entry.kind, abilityId, entry.name or "?", entry.n, Describe(abilityId)))
 			end
 		end
 	end
@@ -999,23 +1375,23 @@ end
 local function PrintText(argument)
 	local targets = {}
 	if argument ~= "" then
-		local rec, id = FindRec(argument)
+		local set, id = FindSet(argument)
 		if not id then
 			d(string.format(GetString(SI_PBSPST_SET_NOT_FOUND), argument))
 			return
 		end
 		-- a set id the player never wore is still readable
-		targets[1] = rec or { setId = id }
+		targets[1] = set or NewSet(id)
 	else
-		for _, rec in ipairs(recs) do
-			if rec.count > 0 then
-				targets[#targets + 1] = rec
+		for _, set in ipairs(sets) do
+			if set.count > 0 then
+				targets[#targets + 1] = set
 			end
 		end
 	end
-	for _, rec in ipairs(targets) do
-		local info = rec.info or addon.ReadSetEffect(rec.setId)
-		d(string.format("%s (id %d)", SetDisplayName(rec), rec.setId))
+	for _, set in ipairs(targets) do
+		local info = set.info or addon.ReadSetEffect(set.setId)
+		d(string.format("%s (id %d)", SetName(set), set.setId))
 		if not info then
 			d("  the game has no such set")
 		else
@@ -1024,11 +1400,30 @@ local function PrintText(argument)
 				for _, hit in ipairs(bonus.parsed.hits) do
 					d(string.format("      %.1f s -> %s", hit.seconds, hit.class))
 				end
+				-- a line cut into several effects: what each of them was read as
+				if #bonus.effects > 1 then
+					for _, effect in ipairs(bonus.effects) do
+						d(
+							string.format(
+								"      effect %d of %d: duration %s, cooldown %s, delay %s: %s",
+								effect.k,
+								effect.n,
+								Seconds(effect.duration),
+								Seconds(effect.cooldown),
+								Seconds(effect.delay),
+								Clip(effect.text, 60)
+							)
+						)
+					end
+				end
 			end
 		end
 	end
 end
 
+-- bind <abilityId> <set>             the whole set (the effect is picked by the ability's name)
+-- bind <abilityId> <set>:<pieces>    one effect: the bonus that needs that many pieces
+-- bind <abilityId> <set>:<pieces>-<n>  the n-th effect of that bonus
 local function Bind(argument)
 	if argument == "clear" then
 		addon.sv.bind = {}
@@ -1041,14 +1436,23 @@ local function Bind(argument)
 		d(GetString(SI_PBSPST_BIND_USAGE))
 		return
 	end
-	local rec = FindRec(target)
-	if not rec then
-		d(string.format(GetString(SI_PBSPST_SET_NOT_FOUND), target))
+	id = tonumber(id)
+	local setPart, line, k = target:match("^(.-):(%d+)%-?(%d*)$")
+	local set = FindSet(setPart or target)
+	if not set then
+		d(string.format(GetString(SI_PBSPST_SET_NOT_FOUND), setPart or target))
 		return
 	end
-	addon.sv.bind[tonumber(id)] = rec.setId
+	local label = SetName(set)
+	if line then
+		k = tonumber(k) or 1
+		addon.sv.bind[id] = { set = set.setId, line = tonumber(line), k = k }
+		label = string.format("%s (%s%s)", label, line, k > 1 and ("-" .. k) or "")
+	else
+		addon.sv.bind[id] = set.setId
+	end
 	ClearVerdicts()
-	d(string.format(GetString(SI_PBSPST_BIND_DONE), tonumber(id), SetDisplayName(rec)))
+	d(string.format(GetString(SI_PBSPST_BIND_DONE), id, label))
 end
 
 local function Ignore(argument)
@@ -1069,14 +1473,13 @@ local function Ignore(argument)
 end
 
 local function HideShow(argument, hide)
-	local rec, id = FindRec(argument)
+	local set, id = FindSet(argument)
 	if not id then
 		d(string.format(GetString(SI_PBSPST_SET_NOT_FOUND), argument))
 		return
 	end
-	addon.sv.hidden[id] = hide or nil
-	Rescan()
-	local name = rec and SetDisplayName(rec) or ("#" .. id)
+	addon:SetTracked(id, not hide)
+	local name = set and SetName(set) or ("#" .. id)
 	d(string.format(GetString(hide and SI_PBSPST_HIDE_DONE or SI_PBSPST_SHOW_DONE), name, id, id))
 end
 
@@ -1132,11 +1535,28 @@ local function OnPlayerActivated()
 	Rescan()
 end
 
+-- The version is written only in the manifest, in the ## Title line; it is read back from there, so
+-- a release changes it in one place (and in ## Version, which the game's own list shows).
+local function ReadManifestVersion()
+	local manager = GetAddOnManager()
+	for index = 1, manager:GetNumAddOns() do
+		local name, title = manager:GetAddOnInfo(index)
+		if name == addon.name and title then
+			local plain = title:gsub("|c%x%x%x%x%x%x", ""):gsub("|r", "")
+			return plain:match("([%d]+[%d%.]*)%s*$") or ""
+		end
+	end
+	return ""
+end
+
 local function OnAddOnLoaded(_, name)
 	if name ~= addon.name then
 		return
 	end
 	em:UnregisterForEvent(addon.name, EVENT_ADD_ON_LOADED)
+
+	addon.version = ReadManifestVersion()
+	addon.title = addon.version ~= "" and (DISPLAY_NAME .. " " .. addon.version) or DISPLAY_NAME
 
 	addon.sv = ZO_SavedVars:NewAccountWide("PBsProcSetTimer_Data", 2, nil, addon.DEFAULTS)
 

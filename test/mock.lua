@@ -238,6 +238,43 @@ end
 HUD_SCENE = scene()
 HUD_UI_SCENE = scene()
 
+-- ---- the add-on manager: the real manifest of the add-on under test ---------------------
+function GetAddOnManager()
+	return {
+		GetNumAddOns = function()
+			return 2
+		end,
+		GetAddOnInfo = function(_, index)
+			if index == 1 then
+				return "SomeOtherAddOn", "Some Other Add-On 9.9"
+			end
+			local file = io.open("../PBsProcSetTimer/PBsProcSetTimer.addon")
+			local text = file and file:read("*a") or ""
+			if file then
+				file:close()
+			end
+			return "PBsProcSetTimer", text:match("## Title:%s*([^\n]*)")
+		end,
+	}
+end
+
+-- ---- the client's callback manager and scene states -----------------------------------
+M.callbacks = {}
+CALLBACK_MANAGER = {
+	RegisterCallback = function(_, name, fn)
+		M.callbacks[name] = M.callbacks[name] or {}
+		table.insert(M.callbacks[name], fn)
+	end,
+	FireCallbacks = function(_, name, ...)
+		-- the client passes the arguments of the call, not the callback's name
+		for _, fn in ipairs(M.callbacks[name] or {}) do
+			fn(...)
+		end
+	end,
+}
+SCENE_SHOWN = "shown"
+SCENE_HIDING = "hiding"
+
 -- ---- saved variables ----------------------------------------------------------------
 local function deepCopy(t)
 	if type(t) ~= "table" then
@@ -250,7 +287,18 @@ local function deepCopy(t)
 	return out
 end
 ZO_SavedVars = {}
+-- M.persist, when set, is the saved data of an earlier session: it is kept across boots, and keys
+-- it lacks are filled from the defaults the way ZO_SavedVars does.
+M.persist = nil
 function ZO_SavedVars:NewAccountWide(_, _, _, defaults)
+	if M.persist then
+		for key, value in pairs(defaults) do
+			if M.persist[key] == nil then
+				M.persist[key] = deepCopy(value)
+			end
+		end
+		return M.persist
+	end
 	return deepCopy(defaults)
 end
 
@@ -295,6 +343,11 @@ function GetItemSetInfo(setId)
 		return false, "", 0, 0, 0, 0
 	end
 	return true, set.name, #set.bonuses, wornCount(setId), M.perfected[setId] or 0, set.max or 5
+end
+-- what the game says an ability does: M.abilityText[abilityId] = "..."
+M.abilityText = {}
+function GetAbilityDescription(abilityId)
+	return M.abilityText[abilityId] or ""
 end
 function GetItemSetName(setId)
 	local set = M.sets[setId]
