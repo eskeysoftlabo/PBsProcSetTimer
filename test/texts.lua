@@ -154,6 +154,13 @@ T.extra = {
 		},
 	},
 }
+T.extra[9301] = {
+	name = "Stackpower Test Set",
+	bonuses = {
+		{ 2, "Adds 1000 Health" },
+		{ 5, "Dealing direct damage generates a stack of Stack Power for 30 seconds, up to 10 stacks. While you have this set equipped, Roll Dodge consumes 1 stack and heals you for 2000 Health." },
+	},
+}
 T.extra[9202] = {
 	name = "Wretched Test Set",
 	bonuses = { { 2, "Adds 1000 Health" }, { 5, T.wretched.en } },

@@ -145,7 +145,7 @@ local function slash(text)
 	SLASH_COMMANDS["/procset"](text)
 end
 
-local function effect(change, name, id, unit, from, to, source)
+local function effect(change, name, id, unit, from, to, source, stacks)
 	M.fire(
 		EVENT_EFFECT_CHANGED,
 		change,
@@ -154,7 +154,7 @@ local function effect(change, name, id, unit, from, to, source)
 		"reticleover",
 		from,
 		to,
-		1,
+		stacks or 1,
 		"icon",
 		"",
 		1,
@@ -223,6 +223,82 @@ for _, variant in ipairs(T.variants) do
 		end
 	end
 	print(string.format("  %-58s placed by position: %s", variant.label, #flagged > 0 and table.concat(flagged, ",") or "-"))
+end
+
+section("parser: shapes found in the real set texts (tick intervals, chains)")
+do
+	local function read(text)
+		local pieces = addon.SplitEffects(text)
+		return #pieces, addon.ParseBonusText(text)
+	end
+	-- a tick interval ("every 2 seconds") in the description is not the cooldown: the sentence that
+	-- says "once every 20 seconds" is
+	local n, r = read("When you heal an ally you conjure a pool for 8 seconds, healing every 2 seconds. This effect can occur once every 20 seconds.")
+	eq(r.cooldown, 20, "a tick interval before the cooldown sentence: the cooldown is the sure one")
+	eq(n, 1, "and it is still one effect")
+	n, r = read("You summon a shadow for 15 seconds. The shadow's attacks deal damage every 2 seconds. The shadow can only be summoned once every 15 seconds.")
+	eq(r.cooldown, 15, "a summon that hits every 2 seconds: cooldown 15")
+	eq(n, 1, "one effect, not cut at the tick")
+	n, r = read("Gain Minor Heroism for 8 seconds, generating 1 Ultimate every 1.5 seconds. This effect can occur every 8 seconds.")
+	eq(r.cooldown, 8, "only bare 'every' wording: the last one, not the tick")
+	eq(n, 1, "one effect")
+	n, r = read("Consecrate the ground for 10 seconds and gain a shield for 6 seconds. Every 2 seconds you gain Minor Courage for 12 seconds. These effects can occur once every 20 seconds.")
+	eq(r.cooldown, 20, "a pulse inside the description: cooldown 20")
+	eq(n, 1, "the pulse's own duration does not start another effect")
+	-- a chain of consequences in a text about stacks is one effect
+	n = read("Damaging an enemy puts a Bone stack on them for 5 seconds, up to once every 0.5 seconds. At 5 stacks, a hand attacks after 1 second, stunning them for 3 seconds. Enemies then become immune for 4 seconds.")
+	eq(n, 1, "build-up, payoff and immunity of a stacking set: one effect")
+	-- two triggers that each carry their own cooldown are two effects
+	n = read("When a negative effect is removed from you, restore Health. This effect can occur once every 1 second. When you take damage and have 6 negative effects, restore Health and cleanse all. This effect can occur once every 30 seconds.")
+	eq(n, 2, "two triggers with a cooldown sentence each: two effects")
+	local pieces = addon.SplitEffects("When a negative effect is removed from you, restore Health. This effect can occur once every 1 second. When you take damage and have 6 negative effects, restore Health and cleanse all. This effect can occur once every 30 seconds.")
+	eq(addon.ParseBonusText(pieces[1] or "").cooldown, 1, "the first one's cooldown is 1")
+	eq(addon.ParseBonusText(pieces[2] or "").cooldown, 30, "the second one's is 30")
+	-- a sentence that only says how the damage scales is not an effect of its own
+	n = read("Deal damage for 5 seconds. This effect can occur once every 8 seconds and scales off your Weapon Damage. The damage is split between enemies.")
+	eq(n, 1, "a tail with no time joins the effect before it")
+	-- the wording of a sure cooldown in Japanese
+	n, r = read("敵に5秒間ダメージを与える。この効果は8秒に1回発生する。")
+	eq(r.cooldown, 8, "JP: 8秒に1回")
+	eq(n, 1, "JP: one effect")
+end
+
+section("parser: stacks")
+do
+	local function stacks(text)
+		local read = addon.ParseStacks(text)
+		return read.stacking, read.max
+	end
+	local a, b = stacks("Dealing direct damage generates a stack of Power for 30 seconds, up to 10 stacks. Roll Dodge consumes 1 stack.")
+	eq(a, true, "EN: a stack word makes the effect a stacking one")
+	eq(b, 10, "EN: up to 10 stacks")
+	a, b = stacks("Gain a stack of Power for 30 seconds (max 6).")
+	eq(b, 6, "EN: (max 6)")
+	a, b = stacks("直接ダメージを与えると累積を30秒の間生成する（最大10）。回避ロールは累積を1消費し、体力を回復する。")
+	eq(a, true, "JP: 累積 makes it a stacking one")
+	eq(b, 10, "JP: 最大10")
+	a, b = stacks("直接ダメージを与えると累積を３０秒の間生成する（最大１０）。")
+	eq(b, 10, "JP: full-width digits")
+	a, b = stacks("Erhalte alle Treffer einen Stapel für 30 Sekunden, bis zu 8 Stapel.")
+	eq(a, true, "DE: Stapel")
+	eq(b, 8, "DE: bis zu 8")
+	a, b = stacks(T.en.zen[4][2])
+	eq(a, false, "Z'en's text names no stack")
+	eq(b, nil, "and its 'up to 5%' is a size, not a count")
+	a, b = stacks("敵に20秒間付与する。ダメージを受けることに1%の追加ダメージを受ける。最大5%まで。")
+	eq(a, false, "JP: a cap in percent is not a count")
+	eq(b, nil, "JP: no maximum")
+	a, b = stacks("Gain stacks for 10 seconds, up to 8% more damage.")
+	eq(a, true, "a stacking effect whose cap is in percent")
+	eq(b, nil, "has no count to show")
+	a, b = stacks("Hits up to 5 enemies and applies a mark for 8 seconds.")
+	eq(a, false, "'up to 5' in a sentence with no stack word is not a stack cap")
+	eq(b, nil, "so no maximum")
+	a, b = stacks(T.en.martial[4][2])
+	eq(a, false, "Way of Martial Knowledge does not stack")
+	eq(addon.ReadSetEffect(9301).bonuses[2].effects[1].maxStacks, 10, "a set read through the item API carries the cap")
+	eq(addon.ReadSetEffect(9301).bonuses[2].effects[1].stacking, true, "and that it stacks")
+	eq(addon.ReadSetEffect(SET.martial.id).bonuses[4].effects[1].stacking, false, "while Martial Knowledge's effect does not")
 end
 
 section("parser: odd input")
@@ -368,6 +444,101 @@ effect(EFFECT_RESULT_GAINED, AB.zen, 126597, 6, M.time, M.time + 20)
 M.advance(21)
 frame()
 eq(rowOf("zen").text.text, GetString(SI_PBSPST_IDLE), "expired by the clock alone")
+
+section("stacks: shown for an effect that builds up")
+-- Z'en's Touch: the text names no stack, but the game reports how many damage-over-time effects count
+addon = boot()
+wear("zen", 5)
+frame()
+t0 = M.time
+effect(EFFECT_RESULT_GAINED, AB.zen, 126597, 5, t0, t0 + 20, nil, 1)
+frame()
+eq(rowOf("zen").text.text, activeText(20), "one stack of an effect not yet known to build up: no count")
+M.advance(1)
+effect(EFFECT_RESULT_UPDATED, AB.zen, 126597, 5, M.time, M.time + 20, nil, 3)
+frame()
+eq(rowOf("zen").text.text, "x3  " .. activeText(20), "three stacks: the count leads the row's text")
+effect(EFFECT_RESULT_UPDATED, AB.zen, 126597, 5, M.time, M.time + 20, nil, 5)
+frame()
+eq(rowOf("zen").text.text, "x5  " .. activeText(20), "five")
+effect(EFFECT_RESULT_UPDATED, AB.zen, 126597, 5, M.time, M.time + 20, nil, 1)
+frame()
+eq(rowOf("zen").text.text, "x1  " .. activeText(20), "back to one: shown now that it is known to build up")
+-- two enemies: the row shows the effect that ends last
+effect(EFFECT_RESULT_UPDATED, AB.zen, 126597, 5, M.time, M.time + 20, nil, 4)
+M.advance(2)
+effect(EFFECT_RESULT_GAINED, AB.zen, 126597, 6, M.time, M.time + 20, nil, 2)
+frame()
+eq(rowOf("zen").text.text, "x2  " .. activeText(20), "the enemy whose effect ends last is the one shown")
+-- the other enemy reports again, its effect ending sooner: it must not take the row over
+effect(EFFECT_RESULT_UPDATED, AB.zen, 126597, 5, M.time - 3, M.time + 10, nil, 4)
+frame()
+eq(rowOf("zen").text.text, "x2  " .. activeText(20), "an update for the enemy whose effect ends sooner does not take over the row")
+effect(EFFECT_RESULT_FADED, AB.zen, 126597, 6, M.time - 5, M.time)
+frame()
+eq(rowOf("zen").text.text, "x4  " .. activeText(10), "it fades: the other enemy's stacks")
+M.chat = {}
+slash("status")
+local statusText = table.concat(M.chat, "\n")
+ok(statusText:find("stacks: now 4, most seen 5; the text does not say so", 1, true) ~= nil, "/procset status reports the stacks seen")
+effect(EFFECT_RESULT_FADED, AB.zen, 126597, 5, M.time - 5, M.time)
+frame()
+eq(rowOf("zen").text.text, GetString(SI_PBSPST_IDLE), "all faded: no count")
+-- a zone change drops the effects but not what was learnt about them
+effect(EFFECT_RESULT_GAINED, AB.zen, 126597, 5, M.time, M.time + 20, nil, 2)
+M.fire(EVENT_PLAYER_ACTIVATED)
+frame()
+eq(rowOf("zen").text.text, GetString(SI_PBSPST_IDLE), "a zone change clears the count")
+effect(EFFECT_RESULT_GAINED, AB.zen, 126597, 5, M.time, M.time + 20, nil, 1)
+frame()
+eq(rowOf("zen").text.text, "x1  " .. activeText(20), "and an effect seen to build up still shows its first stack afterwards")
+
+-- a set whose text says it builds up, and how far: the count shows from the first stack, with its cap
+addon = boot()
+wearId(9301, 5)
+frame()
+eq(rowFor("Stackpower Test Set").text.text, GetString(SI_PBSPST_IDLE), "nothing yet")
+t0 = M.time
+effect(EFFECT_RESULT_GAINED, "Stack Power", 90001, 1, t0, t0 + 30, nil, 1)
+frame()
+eq(rowFor("Stackpower Test Set").text.text, "x1/10  " .. activeText(30), "the text says it builds up to 10: x1/10 from the first stack")
+M.advance(4)
+effect(EFFECT_RESULT_UPDATED, "Stack Power", 90001, 1, M.time, M.time + 30, nil, 4)
+frame()
+eq(rowFor("Stackpower Test Set").text.text, "x4/10  " .. activeText(30), "four of ten")
+effect(EFFECT_RESULT_UPDATED, "Stack Power", 90001, 1, M.time, M.time + 30, nil, 3)
+frame()
+eq(rowFor("Stackpower Test Set").text.text, "x3/10  " .. activeText(30), "a dodge roll consumed one: three of ten")
+effect(EFFECT_RESULT_UPDATED, "Stack Power", 90001, 1, M.time, M.time + 30, nil, 11)
+frame()
+eq(rowFor("Stackpower Test Set").text.text, "x11  " .. activeText(30), "more than the text's cap: the count alone, not a wrong fraction")
+M.chat = {}
+slash("status")
+statusText = table.concat(M.chat, "\n")
+ok(statusText:find("says it builds up, up to 10", 1, true) ~= nil, "/procset status quotes what the text says")
+M.chat = {}
+slash("text 9301")
+ok(table.concat(M.chat, "\n"):find("builds up in stacks, up to 10", 1, true) ~= nil, "/procset text shows the cap it read")
+effect(EFFECT_RESULT_FADED, "Stack Power", 90001, 1, t0, M.time)
+frame()
+eq(rowFor("Stackpower Test Set").text.text, GetString(SI_PBSPST_IDLE), "faded: no count")
+-- the probe prints the count too
+slash("probe")
+M.chat = {}
+effect(EFFECT_RESULT_GAINED, "Unrelated Thing", 777, 1, M.time, M.time + 4, nil, 7)
+ok(table.concat(M.chat, "\n"):find("stacks 7", 1, true) ~= nil, "probe prints the stack count of an unmatched effect")
+
+-- an effect that never builds up never shows a count
+addon = boot()
+wear("martial", 5)
+frame()
+t0 = M.time
+effect(EFFECT_RESULT_GAINED, AB.martial, 127070, 77, t0, t0 + 5, nil, 1)
+frame()
+ok(not rowOf("martial").text.text:find("x1", 1, true), "an effect that reports one stack and no more shows no count")
+effect(EFFECT_RESULT_UPDATED, AB.martial, 127070, 77, t0, t0 + 5, nil, 1)
+frame()
+ok(not rowOf("martial").text.text:find("x1", 1, true), "still none")
 
 section("Tarnished Nightmare (a delayed burst of hits)")
 addon = boot()

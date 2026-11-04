@@ -78,6 +78,18 @@ the settings panel. It only reads game events; it never presses anything for you
 　・効果が複数あるセットでは、行の名前に必要な装備数が付きます。「セット名 (5)」、1つの
 　　ボーナスの中に複数あれば「セット名 (5-2)」のようになります。
 
+■ 累積する効果
+
+　効果が累積するセット（たとえばズェンの矯正や流血の盗賊）は、累積数も表示します。数は行の文字の
+　先頭に出ます。
+
+　　x3/10  発動中 18.2
+
+　数は、ゲームが効果の通知に付けて知らせる値です。説明文に「累積」「スタック」などの語があり、
+　同じ文に「最大N」と書かれていれば、上限も添えて「x3/10」と出します。読み取れなければ「x3」の
+　ように数だけを出します。説明文に累積と書かれていない効果は、2以上の累積が実際に届いてから、
+　数を出すようになります。敵が複数のときは、効果が最後まで残る敵の累積数を出します。
+
 ■ バーを切り替えたとき
 
 　バーを切り替えて、セットのボーナスが切れても、すでに敵に付いている効果や、残りのクールダウンは
@@ -140,9 +152,16 @@ the settings panel. It only reads game events; it never presses anything for you
 　敵に付く効果（デバフ）は、ゲームが知らせる範囲でしか追えません。ターゲットしている敵の
 　ぶんは確実ですが、それ以外の敵のぶんが届くかどうかは確かめていません。
 
+　1つのボーナスを複数の効果に区切る規則は、前の文の結果として起こる効果（召喚獣の攻撃や免疫の
+　期間など）を、独立した効果と見分けられないことがあります。その場合は、行が余分に出ます。
+　/procset text で、どう区切ったかを確認できます。
+
 　説明文の言い回しによっては、秒数が持続時間なのかクールダウンなのかを、文中の位置から推定
 　します。/procset status に「placed by position」と出ている行がそうです。表示が実際と
 　ずれるときは、/procset text で読み取りを確かめてください。
+
+　累積数は、ゲームが効果の通知で知らせる数に従います。すべての効果で届くかどうかは確かめて
+　いません。/procset status の「stacks:」の行で、届いた数を確認できます。
 
 　追うのは、自分が発動した効果だけです。同じセットを着た他のプレイヤーの効果には反応しません。
 
@@ -192,6 +211,18 @@ it is still going, and when it is ready again, as a bar and numbers.
 　　consecutive sentences that each name a duration, and each piece gets a row.
 　- A set with several effects names its rows by the pieces needed: "Set name (5)", or "Set
 　　name (5-2)" for the second effect inside one bonus.
+
+■ Effects that build up
+
+　A set whose effect builds up in stacks (Z'en's Redress and Gorethief, for example) shows how many
+　there are, in front of the row's text:
+
+　　x3/10  Active 18.2
+
+　The number is the one the game reports with the effect. When the text has a stack word and says
+　"up to N" or "max N" in the same sentence, the cap is shown too: "x3/10". Otherwise just "x3".
+　An effect whose text does not mention stacks starts showing a number once two or more have
+　actually been reported. With several enemies the row shows the one whose effect lasts longest.
 
 ■ When you swap bars
 
@@ -252,9 +283,16 @@ it is still going, and when it is ready again, as a bar and numbers.
 　Debuffs on enemies are followed as far as the game reports them. The enemy you target is
 　covered; whether the others are reported has not been checked.
 
+　The rule that cuts a bonus into several effects cannot always tell an effect that merely follows
+　from the one before it (a summon's attacks, an immunity period) from an independent one. Then an
+　extra row appears. /procset text shows how a bonus was cut.
+
 　Depending on the wording, the add-on tells a duration from a cooldown by where the number
 　stands in the sentence. A row marked "placed by position" in /procset status is one of those.
 　If a row does not match the game, check what was read with /procset text.
+
+　The stack count is whatever the game reports with the effect. Whether it does for every effect
+　has not been checked; the "stacks:" line of /procset status shows the numbers that arrived.
 
 　Only effects you fired are followed. Another player wearing the same set does not move your
 　timers.
