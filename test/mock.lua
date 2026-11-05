@@ -110,6 +110,33 @@ end
 EFFECT_RESULT_GAINED = 1
 EFFECT_RESULT_FADED = 2
 EFFECT_RESULT_UPDATED = 3
+BUFF_EFFECT_TYPE_BUFF = 1
+BUFF_EFFECT_TYPE_DEBUFF = 2
+ABILITY_TYPE_BONUS = 5
+ABILITY_TYPE_DAMAGE = 6
+STATUS_EFFECT_TYPE_NONE = 0
+STATUS_EFFECT_TYPE_BLEED = 1
+STATUS_EFFECT_TYPE_POISON = 2
+STATUS_EFFECT_TYPE_DISEASE = 3
+STATUS_EFFECT_TYPE_SNARE = 4
+
+-- The buffs on a unit tag, as GetUnitBuffInfo reads them: M.units[tag] = { name = "...", buffs = { {
+-- name, started, finish, stacks, effectType, abilityType, statusEffectType, abilityId, byPlayer }, ... } }
+M.units = {}
+function DoesUnitExist(tag)
+	return M.units[tag] ~= nil
+end
+function GetUnitName(tag)
+	return M.units[tag] and M.units[tag].name or ""
+end
+function GetNumBuffs(tag)
+	return M.units[tag] and #M.units[tag].buffs or 0
+end
+function GetUnitBuffInfo(tag, index)
+	local b = M.units[tag].buffs[index]
+	M.engineCalls = (M.engineCalls or 0) + 1
+	return b.name, b.started or 0, b.finish or 0, index, b.stacks or 0, "icon", "", b.effectType, b.abilityType, b.statusEffectType, b.abilityId, false, b.byPlayer and true or false
+end
 COMBAT_UNIT_TYPE_NONE = 0
 COMBAT_UNIT_TYPE_PLAYER = 1
 COMBAT_UNIT_TYPE_GROUP = 6

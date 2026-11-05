@@ -74,6 +74,7 @@ local function boot(texts)
 	PBS_PROCSETTIMER = nil
 	M.events, M.filters, M.updates, M.controls, M.chat, M.sounds = {}, {}, {}, {}, {}, {}
 	M.callbacks = {}
+	M.units = {}
 	M.abilityText = {}
 	M.time = 100
 	HUD_SCENE.callbacks, HUD_UI_SCENE.callbacks = {}, {}
@@ -283,11 +284,28 @@ do
 	eq(a, true, "DE: Stapel")
 	eq(b, 8, "DE: bis zu 8")
 	a, b = stacks(T.en.zen[4][2])
-	eq(a, false, "Z'en's text names no stack")
-	eq(b, nil, "and its 'up to 5%' is a size, not a count")
-	a, b = stacks("敵に20秒間付与する。ダメージを受けることに1%の追加ダメージを受ける。最大5%まで。")
-	eq(a, false, "JP: a cap in percent is not a count")
-	eq(b, nil, "JP: no maximum")
+	eq(a, true, "Z'en's text names no stack, but 1% a step up to 5% is a build-up")
+	eq(b, 5, "of five steps")
+	eq(addon.ParseStacks(T.en.zen[4][2]).tally, true, "counted in the target's own damage over time")
+	a, b = stacks("軽攻撃が敵にズエンの接触を20秒の間 与える。ズエンの接触を受けた敵は、継続ダメージ からダメージを受けることに、1%の追加ダメージ を受ける。最大5%まで。")
+	eq(a, true, "JP: the cap is the next sentence after the step")
+	eq(b, 5, "JP: 1% up to 5% is five")
+	eq(addon.ParseStacks("軽攻撃が敵にズエンの接触を20秒の間 与える。ズエンの接触を受けた敵は、継続ダメージ からダメージを受けることに、1%の追加ダメージ を受ける。最大5%まで。").tally, true, "JP: damage over time named (継続ダメージ)")
+	a, b = stacks("継続ダメージ効果1つごとに追加で１％多くのダメージを受ける。最大５％まで。")
+	eq(b, 5, "JP: full-width digits and percent signs")
+	a, b = stacks("Deal 3% more damage for each marked enemy, up to 12%.")
+	eq(b, 4, "any step and cap that divide evenly")
+	eq(addon.ParseStacks("Deal 3% more damage for each marked enemy, up to 12%.").tally, false, "no damage over time named: not a tally")
+	a, b = stacks("Increases damage by 2% every second, up to 5%.")
+	eq(a, false, "a cap that is not a whole number of steps is not a build-up")
+	a, b = stacks("Increase damage by 1% for every Ultimate you have, up to 133%.")
+	eq(a, false, "133 steps is a scale, not a stack count")
+	a, b = stacks("Restore 15% Health. This can happen up to 5% of the time.")
+	eq(a, false, "a cap with no step cue before it (no 'each' or 'per') is a size")
+	a, b = stacks("Deals 10% more damage up to 30%.")
+	eq(a, false, "a percent and a cap in percent with no step wording is a size")
+	a, b = stacks("Applies a stack of Blight Seed. At 20 stacks it explodes, increasing by 150% per additional monster hit, up to 600%.")
+	eq(b, nil, "a text that names stacks keeps its own count: a percent in it adds none")
 	a, b = stacks("Gain stacks for 10 seconds, up to 8% more damage.")
 	eq(a, true, "a stacking effect whose cap is in percent")
 	eq(b, nil, "has no count to show")
@@ -457,30 +475,30 @@ eq(rowOf("zen").text.text, activeText(20), "one stack of an effect not yet known
 M.advance(1)
 effect(EFFECT_RESULT_UPDATED, AB.zen, 126597, 5, M.time, M.time + 20, nil, 3)
 frame()
-eq(rowOf("zen").text.text, "x3  " .. activeText(20), "three stacks: the count leads the row's text")
+eq(rowOf("zen").text.text, "x3/5  " .. activeText(20), "three stacks: the count leads the row's text, with the cap the text gives")
 effect(EFFECT_RESULT_UPDATED, AB.zen, 126597, 5, M.time, M.time + 20, nil, 5)
 frame()
-eq(rowOf("zen").text.text, "x5  " .. activeText(20), "five")
+eq(rowOf("zen").text.text, "x5/5  " .. activeText(20), "five")
 effect(EFFECT_RESULT_UPDATED, AB.zen, 126597, 5, M.time, M.time + 20, nil, 1)
 frame()
-eq(rowOf("zen").text.text, "x1  " .. activeText(20), "back to one: shown now that it is known to build up")
+eq(rowOf("zen").text.text, "x1/5  " .. activeText(20), "back to one: shown now that it is known to build up")
 -- two enemies: the row shows the effect that ends last
 effect(EFFECT_RESULT_UPDATED, AB.zen, 126597, 5, M.time, M.time + 20, nil, 4)
 M.advance(2)
 effect(EFFECT_RESULT_GAINED, AB.zen, 126597, 6, M.time, M.time + 20, nil, 2)
 frame()
-eq(rowOf("zen").text.text, "x2  " .. activeText(20), "the enemy whose effect ends last is the one shown")
+eq(rowOf("zen").text.text, "x2/5  " .. activeText(20), "the enemy whose effect ends last is the one shown")
 -- the other enemy reports again, its effect ending sooner: it must not take the row over
 effect(EFFECT_RESULT_UPDATED, AB.zen, 126597, 5, M.time - 3, M.time + 10, nil, 4)
 frame()
-eq(rowOf("zen").text.text, "x2  " .. activeText(20), "an update for the enemy whose effect ends sooner does not take over the row")
+eq(rowOf("zen").text.text, "x2/5  " .. activeText(20), "an update for the enemy whose effect ends sooner does not take over the row")
 effect(EFFECT_RESULT_FADED, AB.zen, 126597, 6, M.time - 5, M.time)
 frame()
-eq(rowOf("zen").text.text, "x4  " .. activeText(10), "it fades: the other enemy's stacks")
+eq(rowOf("zen").text.text, "x4/5  " .. activeText(10), "it fades: the other enemy's stacks")
 M.chat = {}
 slash("status")
 local statusText = table.concat(M.chat, "\n")
-ok(statusText:find("stacks: now 4, most seen 5; the text does not say so", 1, true) ~= nil, "/procset status reports the stacks seen")
+ok(statusText:find("the game itself reported at most 5", 1, true) ~= nil, "/procset status reports the stacks the game reported")
 effect(EFFECT_RESULT_FADED, AB.zen, 126597, 5, M.time - 5, M.time)
 frame()
 eq(rowOf("zen").text.text, GetString(SI_PBSPST_IDLE), "all faded: no count")
@@ -491,7 +509,126 @@ frame()
 eq(rowOf("zen").text.text, GetString(SI_PBSPST_IDLE), "a zone change clears the count")
 effect(EFFECT_RESULT_GAINED, AB.zen, 126597, 5, M.time, M.time + 20, nil, 1)
 frame()
-eq(rowOf("zen").text.text, "x1  " .. activeText(20), "and an effect seen to build up still shows its first stack afterwards")
+eq(rowOf("zen").text.text, "x1/5  " .. activeText(20), "and an effect seen to build up still shows its first stack afterwards")
+
+-- Z'en's Redress counts the player's own damage-over-time debuffs on the enemy under the reticle
+section("stacks: counted in the target's own damage over time (Z'en's Redress)")
+do
+	addon = boot()
+	wear("zen", 5)
+	frame()
+	local ZEN_ID = 126597
+	local function buff(name, id, own, abilityType, statusType, effectType, finish, started)
+		return {
+			name = name, abilityId = id, byPlayer = own, abilityType = abilityType or ABILITY_TYPE_DAMAGE,
+			statusEffectType = statusType or STATUS_EFFECT_TYPE_NONE, effectType = effectType or BUFF_EFFECT_TYPE_DEBUFF,
+			started = started or (M.time - 1), finish = finish or (M.time + 15),
+		}
+	end
+	local function touch()
+		return buff(AB.zen, ZEN_ID, true, ABILITY_TYPE_BONUS, nil, nil, M.time + 18)
+	end
+	local function look(...)
+		M.units.reticleover = { name = "Mudcrab", buffs = { ... } }
+	end
+	local function row()
+		return rowOf("zen").text.text
+	end
+	local t0 = M.time
+	-- the game reports the debuff with a single stack: that is not a count
+	effect(EFFECT_RESULT_GAINED, AB.zen, ZEN_ID, 5, t0, t0 + 20, nil, 1)
+	frame()
+	eq(row(), activeText(20), "no unit under the reticle: no count")
+
+	look(touch(), buff("Flame Lash", 1001, true), buff("Poison Injection", 1002, true), buff("Rending Leap", 1003, true, ABILITY_TYPE_DAMAGE, STATUS_EFFECT_TYPE_BLEED))
+	M.advance(0.3)
+	frame()
+	eq(row(), "x3/5  " .. activeText(19.7), "the touch and three damage over time effects of yours: three of five")
+
+	look(
+		touch(),
+		buff("Flame Lash", 1001, true),
+		buff("Flame Lash", 1001, true), -- the same ability twice counts once
+		buff("Major Breach", 1004, true, ABILITY_TYPE_BONUS), -- a debuff of yours that does no damage
+		buff("Burning Embers", 1005, false), -- another player's damage over time
+		buff("Minor Maim", 1006, true, ABILITY_TYPE_BONUS, STATUS_EFFECT_TYPE_SNARE), -- a snare is not a damage effect
+		buff("Old Wound", 1007, true, ABILITY_TYPE_DAMAGE, nil, nil, M.time - 1, M.time - 9), -- ran out, not yet removed
+		buff("Battle Spirit", 1008, true, ABILITY_TYPE_DAMAGE, nil, BUFF_EFFECT_TYPE_BUFF) -- a buff
+	)
+	M.advance(0.3)
+	frame()
+	eq(row(), "x1/5  " .. activeText(19.4), "only your damage over time, each ability once, none expired")
+
+	look(touch(), buff("A", 2001, true), buff("B", 2002, true), buff("C", 2003, true), buff("D", 2004, true), buff("E", 2005, true), buff("F", 2006, true), buff("G", 2007, true))
+	M.advance(0.3)
+	frame()
+	eq(row(), "x5/5  " .. activeText(19.1), "seven of them: the effect stops at five")
+
+	look(touch())
+	M.advance(0.3)
+	frame()
+	eq(row(), "x0/5  " .. activeText(18.8), "the touch and no damage over time: zero of five")
+
+	look(buff("A", 2001, true), buff("B", 2002, true)) -- the reticle is on an enemy without the touch
+	M.advance(0.3)
+	frame()
+	eq(row(), activeText(18.5), "an enemy that does not carry the touch: no count")
+
+	-- the count is read at most every quarter second, however many frames are drawn
+	look(touch(), buff("A", 2001, true))
+	M.advance(0.3)
+	frame()
+	local calls = M.engineCalls
+	for _ = 1, 10 do
+		M.advance(0.01)
+		frame()
+	end
+	eq(M.engineCalls, calls, "frames within a quarter second read no buffs")
+	M.advance(0.3)
+	frame()
+	ok(M.engineCalls > calls, "and a later frame does")
+
+	-- should the game ever report two or more stacks of the debuff itself, those are the count
+	effect(EFFECT_RESULT_UPDATED, AB.zen, ZEN_ID, 5, M.time, M.time + 20, nil, 3)
+	look(touch(), buff("A", 2001, true), buff("B", 2002, true), buff("C", 2003, true), buff("D", 2004, true))
+	M.advance(0.3)
+	frame()
+	ok(row():find("x3/5", 1, true) == 1, "the game's own stack count wins once it reports two or more")
+
+	-- /procset buffs
+	M.chat = {}
+	slash("buffs")
+	local text = table.concat(M.chat, "\n")
+	ok(text:find("Mudcrab", 1, true) ~= nil, "/procset buffs names the unit")
+	ok(text:find("+ " .. AB.zen, 1, true) ~= nil, "the row's own effect is marked +")
+	ok(text:find("* A (id 2001)", 1, true) ~= nil, "a counted damage over time is marked *")
+	M.units.reticleover.buffs[#M.units.reticleover.buffs + 1] = buff("Minor Maim", 1006, true, ABILITY_TYPE_BONUS, STATUS_EFFECT_TYPE_SNARE)
+	M.units.reticleover.buffs[#M.units.reticleover.buffs + 1] = buff("Burning Embers", 1005, false)
+	M.chat = {}
+	slash("buffs")
+	text = table.concat(M.chat, "\n")
+	ok(text:find("  Minor Maim (id 1006)", 1, true) ~= nil, "a debuff of yours that is not counted has no mark")
+	ok(text:find("Burning Embers", 1, true) == nil, "another player's effect is not listed")
+	ok(text:find("1 more effect(s) not cast by you", 1, true) ~= nil, "but the count of them is")
+	M.chat = {}
+	slash("buffs all")
+	ok(table.concat(M.chat, "\n"):find("Burning Embers (id 1005)", 1, true) ~= nil, "'all' lists them")
+	M.units = {}
+	M.chat = {}
+	slash("buffs")
+	ok(table.concat(M.chat, "\n"):find("No unit under the reticle", 1, true) ~= nil, "no unit under the reticle: said so")
+
+	M.chat = {}
+	slash("text 455")
+	ok(table.concat(M.chat, "\n"):find("builds up in stacks, up to 5; counted in your own damage over time", 1, true) ~= nil, "/procset text says what it read: five steps, counted in damage over time")
+
+	-- /procset status
+	look(touch(), buff("A", 2001, true), buff("B", 2002, true))
+	M.advance(0.3)
+	M.chat = {}
+	slash("status")
+	ok(table.concat(M.chat, "\n"):find("counted on the target under the reticle: 2", 1, true) ~= nil, "/procset status shows the count")
+end
 
 -- a set whose text says it builds up, and how far: the count shows from the first stack, with its cap
 addon = boot()

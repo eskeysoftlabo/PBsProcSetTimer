@@ -90,6 +90,10 @@ the settings panel. It only reads game events; it never presses anything for you
 　ように数だけを出します。説明文に累積と書かれていない効果は、2以上の累積が実際に届いてから、
 　数を出すようになります。敵が複数のときは、効果が最後まで残る敵の累積数を出します。
 
+　ズェンの矯正のように、「継続ダメージ1つごとに1%、最大5%」と書かれた効果は、割合の刻みと
+　上限から5段階の累積と読みます。この数はゲームが知らせないので、注目している敵にかかっている
+　自分の継続ダメージを数えて、「x3/5」のように出します。
+
 ■ バーを切り替えたとき
 
 　バーを切り替えて、セットのボーナスが切れても、すでに敵に付いている効果や、残りのクールダウンは
@@ -162,6 +166,8 @@ the settings panel. It only reads game events; it never presses anything for you
 
 　累積数は、ゲームが効果の通知で知らせる数に従います。すべての効果で届くかどうかは確かめて
 　いません。/procset status の「stacks:」の行で、届いた数を確認できます。
+　ズェンの矯正の「継続ダメージの数え方」は、実機で確かめていません。/procset buffs で、注目している
+　敵のどのデバフを数えているかが分かります。
 
 　追うのは、自分が発動した効果だけです。同じセットを着た他のプレイヤーの効果には反応しません。
 
@@ -223,6 +229,11 @@ it is still going, and when it is ready again, as a bar and numbers.
 　"up to N" or "max N" in the same sentence, the cap is shown too: "x3/10". Otherwise just "x3".
 　An effect whose text does not mention stacks starts showing a number once two or more have
 　actually been reported. With several enemies the row shows the one whose effect lasts longest.
+
+　An effect told in percent steps ("1% more damage for each damage over time effect you've placed on
+　them, up to 5%", as in Z'en's Redress) is read as a build-up of five. The game does not report that
+　count, so the add-on counts your own damage-over-time effects on the enemy under your reticle and
+　shows "x3/5"; it counts only while that enemy carries your Touch of Z'en.
 
 ■ When you swap bars
 
@@ -293,6 +304,8 @@ it is still going, and when it is ready again, as a bar and numbers.
 
 　The stack count is whatever the game reports with the effect. Whether it does for every effect
 　has not been checked; the "stacks:" line of /procset status shows the numbers that arrived.
+　Which of an enemy's debuffs count as your damage over time (for Z'en's Redress) is a first rule that
+　has not been checked in the game; /procset buffs shows what it counts.
 
 　Only effects you fired are followed. Another player wearing the same set does not move your
 　timers.
